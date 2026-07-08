@@ -89,7 +89,6 @@ const routes = [
   { id: "analytics", label: "Analytics", icon: "chart" }, { id: "admin", label: "Admin", icon: "settings" }
 ];
 const roleLabels = { student: "Student", lecturer: "Lecturer", admin: "Admin" };
-const demoPasswords = { student: "student123", lecturer: "lecturer123", admin: "admin123" };
 const sessionKey = "vfu-session";
 let state = null, currentRoute = "dashboard", currentUser = null, query = "", authMode = "login", authRole = "student", whiteboardReady = false, selectedDocUrl = "";
 let uploadedDocs = [];
@@ -254,14 +253,14 @@ function renderAuth() {
   const role = isLogin ? authRole : authMode === "signup-lecturer" ? "lecturer" : "student";
   return `<section class="auth-layout">
     <div class="auth-visual"><span class="brand-mark large">V</span><p class="eyebrow">${escapeHtml(state.institution.term)}</p><h1>${escapeHtml(state.institution.name)}</h1><p>${escapeHtml(state.institution.tagline)}</p><div class="auth-feature-grid"><span>${icon("video")} Live classes</span><span>${icon("board")} Whiteboard</span><span>${icon("quiz")} Quizzes</span><span>${icon("chart")} Analytics</span></div></div>
-    <div class="auth-panel"><div class="auth-tabs" role="tablist" aria-label="Authentication options"><button class="${authMode === "login" ? "active" : ""}" type="button" data-auth-mode="login">Login</button><button class="${authMode === "signup-student" ? "active" : ""}" type="button" data-auth-mode="signup-student">Student sign up</button><button class="${authMode === "signup-lecturer" ? "active" : ""}" type="button" data-auth-mode="signup-lecturer">Lecturer sign up</button></div>
+    <div class="auth-panel"><div class="auth-tabs" role="tablist" aria-label="Authentication options"><button class="${authMode === "login" ? "active" : ""}" type="button" data-auth-mode="login">Login</button><button class="${authMode === "signup-student" ? "active" : ""}" type="button" data-auth-mode="signup-student">Student sign up</button></div>
     <form class="auth-form" id="authForm" data-mode="${authMode}"><div><p class="eyebrow">${isLogin ? "Secure access" : role === "student" ? "Learner registration" : "Lecturer registration"}</p><h2>${isLogin ? "Sign in to your classroom" : role === "student" ? "Create student account" : "Create lecturer account"}</h2></div>
       ${isLogin ? `<label>Role<select name="role" id="loginRole"><option value="student" ${authRole === "student" ? "selected" : ""}>Student</option><option value="lecturer" ${authRole === "lecturer" ? "selected" : ""}>Lecturer</option><option value="admin" ${authRole === "admin" ? "selected" : ""}>Admin</option></select></label>` : `<input type="hidden" name="role" value="${role}">`}
       ${!isLogin ? `<label>Full name<input name="name" required placeholder="Enter full name"></label>` : ""}
-      <label>Email<input name="email" type="email" required value="${isLogin ? `${authRole}@vfu.local` : ""}" placeholder="name@vfu.edu"></label><label>Password<input name="password" type="password" required minlength="6" value="${isLogin ? escapeHtml(demoPasswords[authRole] || "") : ""}" placeholder="Minimum 6 characters"></label>
+      <label>Email<input name="email" type="email" required autocomplete="off" placeholder="name@vfu.edu"></label><label>Password<input name="password" type="password" required minlength="6" autocomplete="off" placeholder="Enter your password"></label>
       ${!isLogin && role === "student" ? `<div class="field-grid"><label>Student number<input name="studentNumber" required placeholder="VFU-ST-2026-001"></label><label>Program<select name="program"><option>BSc Information and Communication Technology</option><option>BSc Business and Financial Management</option><option>Diploma in ICT</option></select></label></div><label>Phone<input name="phone" placeholder="Optional"></label>` : ""}
       ${!isLogin && role === "lecturer" ? `<div class="field-grid"><label>Staff number<input name="staffNumber" required placeholder="VFU-LEC-2026-001"></label><label>School<select name="department"><option>School of ICT</option><option>Business and Financial Management</option><option>Academic Registry</option></select></label></div><label>Primary course<input name="program" placeholder="Example: Web Application Development"></label>` : ""}
-      <button class="action primary wide" type="submit">${icon(isLogin ? "logout" : "plus")} ${isLogin ? "Login" : "Create account"}</button><p class="auth-note">Demo accounts: student@vfu.local / student123, lecturer@vfu.local / lecturer123, admin@vfu.local / admin123.</p>
+      <button class="action primary wide" type="submit">${icon(isLogin ? "logout" : "plus")} ${isLogin ? "Login" : "Create account"}</button>${isLogin ? `<p class="auth-note">Select your role, then enter the email and password provided to you.</p>` : ""}
     </form></div></section>`;
 }
 
