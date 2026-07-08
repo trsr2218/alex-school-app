@@ -386,7 +386,14 @@ function normalizeRole(value) {
 
 function publicFilePath(urlPath) {
   const requested = urlPath === "/" ? "/index.html" : urlPath;
-  const normalized = path.normalize(decodeURIComponent(requested)).replace(/^(\.\.[/\\])+/, "");
+  let decoded;
+  try {
+    decoded = decodeURIComponent(requested);
+  } catch (error) {
+    // Malformed percent-encoding (e.g. "/%E0%A4%A") — reject instead of crashing the process.
+    return null;
+  }
+  const normalized = path.normalize(decoded).replace(/^(\.\.[/\\])+/, "");
   const filePath = path.join(PUBLIC_DIR, normalized);
 
   if (!filePath.startsWith(PUBLIC_DIR)) {

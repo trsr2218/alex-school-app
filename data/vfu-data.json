@@ -179,7 +179,44 @@
       "read": false
     }
   ],
-  "sessions": [],
+  "sessions": [
+    {
+      "token": "f798b0ade09f73a2b33e0ff3f243cb62d01105009507d1f7",
+      "userId": "u-student-1",
+      "role": "student",
+      "name": "Alex Likando",
+      "email": "student@vfu.local",
+      "createdAt": 1783523195272,
+      "expiresAt": 1783566395272
+    },
+    {
+      "token": "0ad3061edebaad7ec9985fa8f5ff51c1f02d5d4541d033a0",
+      "userId": "u-lecturer-1",
+      "role": "lecturer",
+      "name": "Dr. Naomi Banda",
+      "email": "lecturer@vfu.local",
+      "createdAt": 1783523195412,
+      "expiresAt": 1783566395412
+    },
+    {
+      "token": "e047eb290f1e115fa54c2fd836db4fcfc4692d5991a97ea8",
+      "userId": "u-admin-1",
+      "role": "admin",
+      "name": "System Administrator",
+      "email": "admin@vfu.local",
+      "createdAt": 1783523195552,
+      "expiresAt": 1783566395552
+    },
+    {
+      "token": "7a9c7d19060d00656528e2e4fd529cda6768466a1ccff255",
+      "userId": "u-student-1",
+      "role": "student",
+      "name": "Alex Likando",
+      "email": "student@vfu.local",
+      "createdAt": 1783526210710,
+      "expiresAt": 1783569410710
+    }
+  ],
   "analytics": {
     "activeStudents": 118,
     "attendanceRate": 86,

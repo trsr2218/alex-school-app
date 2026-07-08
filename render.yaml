@@ -1,0 +1,16 @@
+# Render Blueprint — https://render.com/docs/blueprint-spec
+# Deploy: Render dashboard > New + > Blueprint > connect this repo.
+services:
+  - type: web
+    name: alex-school-app
+    runtime: node
+    plan: free
+    region: oregon
+    branch: main
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /api/state
+    envVars:
+      - key: SESSION_TTL_HOURS
+        value: "12"
+      # DB_* are intentionally unset — the app runs on its zero-cost JSON store.
