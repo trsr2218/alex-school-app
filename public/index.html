@@ -1,0 +1,72 @@
+﻿<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>VFU E-Learning Classroom</title>
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <div class="app-shell" id="appShell">
+      <aside class="sidebar" aria-label="Primary">
+        <a class="brand" href="#dashboard" data-route="dashboard" aria-label="VFU dashboard">
+          <span class="brand-mark">V</span>
+          <span>
+            <strong>VFU</strong>
+            <small>E-Learning Classroom</small>
+          </span>
+        </a>
+
+        <nav class="nav-list" id="navList"></nav>
+
+        <section class="session-panel" id="sessionPanel" aria-label="Active session"></section>
+
+        <section class="role-panel" aria-label="Demo role switcher">
+          <span class="eyebrow">Role</span>
+          <div class="segmented" id="roleSwitch">
+            <button class="action" type="button" data-demo-role="student">Student</button>
+            <button class="action" type="button" data-demo-role="lecturer">Lecturer</button>
+            <button class="action" type="button" data-demo-role="admin">Admin</button>
+          </div>
+        </section>
+      </aside>
+
+      <main class="main">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow" id="termLabel">June 2026 Semester</p>
+            <h1 id="pageTitle">Dashboard</h1>
+          </div>
+          <div class="topbar-actions">
+            <label class="search">
+              <span aria-hidden="true">/</span>
+              <input id="searchInput" type="search" placeholder="Search courses, assignments, discussions">
+            </label>
+            <button class="icon-button" id="notificationButton" title="Notifications" type="button">
+              <span aria-hidden="true" data-icon="bell"></span>
+              <span class="badge" id="notificationCount">0</span>
+            </button>
+            <div class="profile" id="profileCard"></div>
+          </div>
+        </header>
+
+        <section class="notice-stack" id="noticeStack" aria-live="polite"></section>
+        <section id="viewRoot" class="view-root"></section>
+      </main>
+    </div>
+
+    <template id="emptyStateTemplate">
+      <div class="empty-state">
+        <div class="empty-visual" aria-hidden="true"></div>
+        <h2>No matching records</h2>
+        <p>Try a different search term or switch role context.</p>
+      </div>
+    </template>
+
+    <script src="state.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>
+
+
+

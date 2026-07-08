@@ -1,0 +1,4 @@
+node_modules/
+.env
+data/vfu-data.json.tmp
+data/vfu-data.json.bak
