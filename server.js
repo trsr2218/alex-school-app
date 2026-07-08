@@ -445,7 +445,10 @@ async function handleLogin(res, data, body) {
 async function handleSignup(res, data, body) {
   const name = sanitizeText(body.name);
   const email = sanitizeText(body.email).toLowerCase();
-  const role = normalizeRole(body.role);
+  // Public self-registration is student-only. Elevated roles (lecturer/admin)
+  // must be provisioned by an existing admin, not chosen by the signup caller —
+  // otherwise anyone can register themselves as an admin.
+  const role = "student";
   const password = String(body.password || "");
 
   if (!name || !email) {

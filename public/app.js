@@ -1,6 +1,5 @@
 ﻿
 (() => {
-  if (window.location.protocol !== "file:") return;
   const originalFetch = window.fetch.bind(window);
   const storageKey = "vfu-offline-state";
   const clone = (value) => JSON.parse(JSON.stringify(value));
@@ -9,13 +8,8 @@
   const initials = (name) => String(name || "VFU").split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0].toUpperCase()).join("") || "VU";
   const jsonResponse = (payload, status = 200) => new Response(JSON.stringify(payload), { status, headers: { "content-type": "application/json; charset=utf-8" } });
 
-  window.fetch = async (resource, options = {}) => {
-    const path = String(resource);
-    if (!path.startsWith("/api/")) return originalFetch(resource, options);
-    const method = options.method || "GET";
-    const body = options.body ? JSON.parse(options.body) : {};
+  const handleOffline = (path, method, body) => {
     const data = readState();
-
     if (method === "GET" && path === "/api/state") return jsonResponse(data);
     if (method === "POST" && path === "/api/login") {
       const role = String(body.role || "student").toLowerCase();
@@ -26,7 +20,8 @@
     if (method === "POST" && path === "/api/signup") {
       const email = String(body.email || "").trim().toLowerCase();
       if (!email || data.users.some((user) => user.email.toLowerCase() === email)) return jsonResponse({ error: "Use a new valid email address." }, 400);
-      const user = { id: `u-${body.role || "student"}-${Date.now()}`, name: String(body.name || "New User").trim(), email, role: body.role === "lecturer" ? "lecturer" : "student", program: String(body.program || body.department || "VFU").trim(), studentNumber: body.studentNumber || "", staffNumber: body.staffNumber || "", phone: body.phone || "", avatar: initials(body.name), createdAt: new Date().toISOString() };
+      // Public self-registration is student-only, matching the server.
+      const user = { id: `u-student-${Date.now()}`, name: String(body.name || "New User").trim(), email, role: "student", program: String(body.program || body.department || "VFU").trim(), studentNumber: body.studentNumber || "", staffNumber: body.staffNumber || "", phone: body.phone || "", avatar: initials(body.name), createdAt: new Date().toISOString() };
       data.users.push(user); saveState(data); return jsonResponse({ user, token: `offline-${Date.now()}` }, 201);
     }
     if (method === "POST" && path === "/api/attendance") {
@@ -53,6 +48,37 @@
       saveState(data); return jsonResponse({ courses: data.courses });
     }
     return jsonResponse({ error: "Offline API route was not found." }, 404);
+  };
+
+  // Offline mode serves the whole API from localStorage (seeded from VFU_SEED_STATE).
+  // It engages when there is no JSON backend to talk to: opened as a file:// page, or
+  // hosted statically (e.g. Vercel) where /api/* is not answered by our Node server.
+  // Served mode (npm start / Render) hits the real server and this shim stays out of the way.
+  let backendAvailable = window.location.protocol === "file:" ? false : null;
+
+  window.fetch = async (resource, options = {}) => {
+    const path = String(resource);
+    if (!path.startsWith("/api/")) return originalFetch(resource, options);
+    const method = options.method || "GET";
+    const body = options.body ? JSON.parse(options.body) : {};
+
+    if (backendAvailable === false) return handleOffline(path, method, body);
+
+    try {
+      const response = await originalFetch(resource, options);
+      const contentType = response.headers.get("content-type") || "";
+      if (!contentType.includes("application/json")) {
+        // A static host answered with HTML (no API) — switch to offline for this session.
+        backendAvailable = false;
+        return handleOffline(path, method, body);
+      }
+      backendAvailable = true;
+      return response;
+    } catch (error) {
+      // Network error reaching the backend — fall back to the local store.
+      backendAvailable = false;
+      return handleOffline(path, method, body);
+    }
   };
 })();
 
