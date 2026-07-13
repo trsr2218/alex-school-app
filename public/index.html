@@ -1,5 +1,5 @@
-﻿<!doctype html>
-<html lang="en">
+<!doctype html>
+<html lang="en" data-theme="dark">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -20,15 +20,6 @@
         <nav class="nav-list" id="navList"></nav>
 
         <section class="session-panel" id="sessionPanel" aria-label="Active session"></section>
-
-        <section class="role-panel" aria-label="Demo role switcher">
-          <span class="eyebrow">Role</span>
-          <div class="segmented" id="roleSwitch">
-            <button class="action" type="button" data-demo-role="student">Student</button>
-            <button class="action" type="button" data-demo-role="lecturer">Lecturer</button>
-            <button class="action" type="button" data-demo-role="admin">Admin</button>
-          </div>
-        </section>
       </aside>
 
       <main class="main">
@@ -42,6 +33,11 @@
               <span aria-hidden="true">/</span>
               <input id="searchInput" type="search" placeholder="Search courses, assignments, discussions">
             </label>
+            <div class="theme-switch" id="themeSwitch" role="group" aria-label="Theme">
+              <button class="theme-dot theme-dot-dark" type="button" data-theme-set="dark" title="Dark theme"></button>
+              <button class="theme-dot theme-dot-light" type="button" data-theme-set="light" title="Light theme"></button>
+              <button class="theme-dot theme-dot-ocean" type="button" data-theme-set="ocean" title="Ocean theme"></button>
+            </div>
             <button class="icon-button" id="notificationButton" title="Notifications" type="button">
               <span aria-hidden="true" data-icon="bell"></span>
               <span class="badge" id="notificationCount">0</span>
@@ -55,18 +51,7 @@
       </main>
     </div>
 
-    <template id="emptyStateTemplate">
-      <div class="empty-state">
-        <div class="empty-visual" aria-hidden="true"></div>
-        <h2>No matching records</h2>
-        <p>Try a different search term or switch role context.</p>
-      </div>
-    </template>
-
     <script src="state.js"></script>
     <script src="app.js"></script>
   </body>
 </html>
-
-
-

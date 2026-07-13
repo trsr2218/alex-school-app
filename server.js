@@ -244,6 +244,8 @@ const defaultData = {
       role: "student",
       program: "BSc Information and Communication Technology",
       avatar: "AL",
+      createdAt: "2026-01-12T08:00:00.000Z",
+      pendingBalance: 2500,
       passwordHash: hashPassword("student123")
     },
     {
@@ -271,6 +273,7 @@ const defaultData = {
   assignments: [],
   submissions: [],
   discussions: [],
+  studyRooms: [],
   notifications: [],
   analytics: {
     activeStudents: 0,
@@ -293,6 +296,7 @@ function ensureDataShape(data) {
     assignments: Array.isArray(normalized.assignments) ? normalized.assignments : [],
     submissions: Array.isArray(normalized.submissions) ? normalized.submissions : [],
     discussions: Array.isArray(normalized.discussions) ? normalized.discussions : [],
+    studyRooms: Array.isArray(normalized.studyRooms) ? normalized.studyRooms : [],
     notifications: Array.isArray(normalized.notifications) ? normalized.notifications : [],
     sessions: Array.isArray(normalized.sessions) ? normalized.sessions : [],
     analytics: normalized.analytics && typeof normalized.analytics === "object" ? normalized.analytics : defaultData.analytics
@@ -382,6 +386,22 @@ function validatePassword(password) {
 function normalizeRole(value) {
   const role = String(value || "student").toLowerCase();
   return role === "lecturer" || role === "admin" ? role : "student";
+}
+
+// Maps a free-text program/department string to a broad academic field so
+// students only see and join courses in their own field (client requirement).
+function fieldForProgram(value) {
+  const text = String(value || "").toLowerCase();
+  if (/(ict|information|computer|software|network|technolog)/.test(text)) return "ICT";
+  if (/(business|financial|account|management|marketing)/.test(text)) return "Business";
+  return null;
+}
+
+function canAccessCourse(user, course) {
+  if (!user || user.role !== "student" || !course) return true;
+  const studentField = fieldForProgram(user.program);
+  const courseField = fieldForProgram(course.department);
+  return !studentField || !courseField || studentField === courseField;
 }
 
 function publicFilePath(urlPath) {
@@ -561,14 +581,20 @@ function submitAssignment(res, data, body) {
   const assignment = data.assignments.find((item) => item.id === body.assignmentId);
   const user = data.users.find((item) => item.id === body.userId);
   const text = sanitizeText(body.text);
+  const fileName = sanitizeText(body.fileName);
+  const fileType = sanitizeText(body.fileType);
+  const fileSize = Number(body.fileSize) > 0 ? Number(body.fileSize) : 0;
+  const fileData = typeof body.fileData === "string" && body.fileData.startsWith("data:") && body.fileData.length <= 800_000
+    ? body.fileData
+    : "";
 
   if (!assignment || !user) {
     sendJson(res, 404, { error: "Assignment or user was not found." });
     return;
   }
 
-  if (!text) {
-    sendJson(res, 400, { error: "Submission text is required." });
+  if (!text && !fileName) {
+    sendJson(res, 400, { error: "Submission text or an attached file is required." });
     return;
   }
 
@@ -578,8 +604,12 @@ function submitAssignment(res, data, body) {
 
   if (existing) {
     existing.text = text;
+    existing.fileName = fileName || existing.fileName || "";
+    existing.fileType = fileType || existing.fileType || "";
+    existing.fileSize = fileSize || existing.fileSize || 0;
+    if (fileData) existing.fileData = fileData;
     existing.submittedAt = new Date().toISOString();
-    existing.status = "Updated";
+    existing.status = "Submitted";
   } else {
     data.submissions.push({
       id: `sub-${Date.now()}`,
@@ -587,6 +617,10 @@ function submitAssignment(res, data, body) {
       courseId: assignment.courseId,
       userId: user.id,
       text,
+      fileName,
+      fileType,
+      fileSize,
+      fileData,
       status: "Submitted",
       grade: null,
       submittedAt: new Date().toISOString()
@@ -595,6 +629,205 @@ function submitAssignment(res, data, body) {
 
   writeData(data);
   sendJson(res, 200, { submissions: data.submissions, message: "Assignment submitted." });
+}
+
+function createAssignment(res, data, body) {
+  const course = data.courses.find((item) => item.id === body.courseId);
+  const title = sanitizeText(body.title);
+
+  if (!course || !title) {
+    sendJson(res, 400, { error: "A valid course and assignment title are required." });
+    return;
+  }
+
+  const due = new Date(body.dueAt || "");
+  const assignment = {
+    id: `assignment-${Date.now()}`,
+    courseId: course.id,
+    title,
+    description: sanitizeText(body.description),
+    dueAt: Number.isNaN(due.getTime()) ? new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString() : due.toISOString(),
+    points: Number(body.points) > 0 ? Number(body.points) : 10,
+    status: "Open"
+  };
+
+  data.assignments.push(assignment);
+  writeData(data);
+  sendJson(res, 201, { assignment, assignments: data.assignments });
+}
+
+function startClassSession(res, data, body, authUser) {
+  const course = data.courses.find((item) => item.id === body.courseId);
+  if (!course) {
+    sendJson(res, 404, { error: "Course was not found." });
+    return;
+  }
+
+  if (data.classSessions.some((item) => item.courseId === course.id && item.status === "Live")) {
+    sendJson(res, 409, { error: "A live class is already running for this course." });
+    return;
+  }
+
+  const duration = Number(body.duration);
+  const session = {
+    id: `session-${Date.now()}`,
+    courseId: course.id,
+    title: sanitizeText(body.title) || `${course.title} live class`,
+    startsAt: new Date().toISOString(),
+    duration: duration > 0 ? Math.min(duration, 480) : 60,
+    status: "Live",
+    participants: 0,
+    hostId: authUser.id
+  };
+
+  data.classSessions.push(session);
+  writeData(data);
+  sendJson(res, 201, { session, classSessions: data.classSessions });
+}
+
+function joinClassSession(res, data, body, authUser) {
+  const session = data.classSessions.find((item) => item.id === body.sessionId);
+  if (!session) {
+    sendJson(res, 404, { error: "Class session was not found." });
+    return;
+  }
+
+  if (session.status !== "Live") {
+    sendJson(res, 409, { error: "This class is not live right now." });
+    return;
+  }
+
+  const course = data.courses.find((item) => item.id === session.courseId);
+  const user = data.users.find((item) => item.id === authUser.id) || authUser;
+  if (!canAccessCourse(user, course)) {
+    sendJson(res, 403, { error: "This class is only open to students enrolled in its field." });
+    return;
+  }
+
+  // Joining a live class is what marks a student present (auto-attendance).
+  if (user.role === "student") {
+    const already = data.attendance.some((item) => item.sessionId === session.id && item.userId === user.id);
+    if (!already) {
+      data.attendance.push({
+        id: `att-${Date.now()}`,
+        sessionId: session.id,
+        courseId: session.courseId,
+        userId: user.id,
+        status: "Present",
+        joinedAt: new Date().toISOString()
+      });
+      session.participants = Number(session.participants || 0) + 1;
+      writeData(data);
+    }
+  }
+
+  sendJson(res, 200, { session, attendance: data.attendance, message: "Joined the live class." });
+}
+
+function endClassSession(res, data, body) {
+  const session = data.classSessions.find((item) => item.id === body.sessionId);
+  if (!session) {
+    sendJson(res, 404, { error: "Class session was not found." });
+    return;
+  }
+
+  if (session.status !== "Live") {
+    sendJson(res, 409, { error: "This class is not live." });
+    return;
+  }
+
+  session.status = "Ended";
+  session.endedAt = new Date().toISOString();
+
+  // Students in the course's field who never joined are marked absent automatically.
+  const course = data.courses.find((item) => item.id === session.courseId);
+  for (const user of data.users) {
+    if (user.role !== "student" || !canAccessCourse(user, course)) continue;
+    const marked = data.attendance.some((item) => item.sessionId === session.id && item.userId === user.id);
+    if (!marked) {
+      data.attendance.push({
+        id: `att-${Date.now()}-${user.id}`,
+        sessionId: session.id,
+        courseId: session.courseId,
+        userId: user.id,
+        status: "Absent",
+        joinedAt: null
+      });
+    }
+  }
+
+  writeData(data);
+  sendJson(res, 200, { session, attendance: data.attendance, message: "Class ended. Missing students were marked absent." });
+}
+
+function createStudyRoom(res, data, body, authUser) {
+  const course = data.courses.find((item) => item.id === body.courseId);
+  const topic = sanitizeText(body.topic);
+
+  if (!course || !topic) {
+    sendJson(res, 400, { error: "A valid course and study topic are required." });
+    return;
+  }
+
+  const user = data.users.find((item) => item.id === authUser.id) || authUser;
+  if (!canAccessCourse(user, course)) {
+    sendJson(res, 403, { error: "You can only open study rooms for courses in your field." });
+    return;
+  }
+
+  const room = {
+    id: `room-${Date.now()}`,
+    courseId: course.id,
+    topic,
+    hostId: user.id,
+    hostName: user.name,
+    status: "Open",
+    createdAt: new Date().toISOString(),
+    members: [user.id]
+  };
+
+  data.studyRooms.push(room);
+  writeData(data);
+  sendJson(res, 201, { room, studyRooms: data.studyRooms });
+}
+
+function joinStudyRoom(res, data, body, authUser) {
+  const room = data.studyRooms.find((item) => item.id === body.roomId);
+  if (!room || room.status !== "Open") {
+    sendJson(res, 404, { error: "Study room is not open." });
+    return;
+  }
+
+  const course = data.courses.find((item) => item.id === room.courseId);
+  const user = data.users.find((item) => item.id === authUser.id) || authUser;
+  if (!canAccessCourse(user, course)) {
+    sendJson(res, 403, { error: "This room is private to students of its course field." });
+    return;
+  }
+
+  if (!room.members.includes(user.id)) {
+    room.members.push(user.id);
+    writeData(data);
+  }
+
+  sendJson(res, 200, { room, studyRooms: data.studyRooms });
+}
+
+function closeStudyRoom(res, data, body, authUser) {
+  const room = data.studyRooms.find((item) => item.id === body.roomId);
+  if (!room) {
+    sendJson(res, 404, { error: "Study room was not found." });
+    return;
+  }
+
+  if (room.hostId !== authUser.id && authUser.role === "student") {
+    sendJson(res, 403, { error: "Only the host can close this room." });
+    return;
+  }
+
+  room.status = "Closed";
+  writeData(data);
+  sendJson(res, 200, { room, studyRooms: data.studyRooms });
 }
 
 function addForumMessage(res, data, body) {
@@ -752,6 +985,88 @@ async function handleApi(req, res) {
         return;
       }
       createCourse(res, data, body);
+      return;
+    }
+
+    if (req.method === "POST" && req.url === "/api/assignments") {
+      const auth = authenticate(req, data);
+      if (!auth) {
+        sendJson(res, 401, { error: "Sign in required." });
+        return;
+      }
+      if (auth.user.role !== "lecturer" && auth.user.role !== "admin") {
+        sendJson(res, 403, { error: "Only lecturers can create assignments." });
+        return;
+      }
+      createAssignment(res, data, body);
+      return;
+    }
+
+    if (req.method === "POST" && req.url === "/api/sessions/start") {
+      const auth = authenticate(req, data);
+      if (!auth) {
+        sendJson(res, 401, { error: "Sign in required." });
+        return;
+      }
+      if (auth.user.role !== "lecturer" && auth.user.role !== "admin") {
+        sendJson(res, 403, { error: "Only lecturers can start a live class." });
+        return;
+      }
+      startClassSession(res, data, body, auth.user);
+      return;
+    }
+
+    if (req.method === "POST" && req.url === "/api/sessions/join") {
+      const auth = authenticate(req, data);
+      if (!auth) {
+        sendJson(res, 401, { error: "Sign in required." });
+        return;
+      }
+      joinClassSession(res, data, body, auth.user);
+      return;
+    }
+
+    if (req.method === "POST" && req.url === "/api/sessions/end") {
+      const auth = authenticate(req, data);
+      if (!auth) {
+        sendJson(res, 401, { error: "Sign in required." });
+        return;
+      }
+      if (auth.user.role !== "lecturer" && auth.user.role !== "admin") {
+        sendJson(res, 403, { error: "Only lecturers can end a live class." });
+        return;
+      }
+      endClassSession(res, data, body);
+      return;
+    }
+
+    if (req.method === "POST" && req.url === "/api/studyrooms") {
+      const auth = authenticate(req, data);
+      if (!auth) {
+        sendJson(res, 401, { error: "Sign in required." });
+        return;
+      }
+      createStudyRoom(res, data, body, auth.user);
+      return;
+    }
+
+    if (req.method === "POST" && req.url === "/api/studyrooms/join") {
+      const auth = authenticate(req, data);
+      if (!auth) {
+        sendJson(res, 401, { error: "Sign in required." });
+        return;
+      }
+      joinStudyRoom(res, data, body, auth.user);
+      return;
+    }
+
+    if (req.method === "POST" && req.url === "/api/studyrooms/close") {
+      const auth = authenticate(req, data);
+      if (!auth) {
+        sendJson(res, 401, { error: "Sign in required." });
+        return;
+      }
+      closeStudyRoom(res, data, body, auth.user);
       return;
     }
 

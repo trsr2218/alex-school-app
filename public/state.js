@@ -1,4 +1,4 @@
-﻿window.VFU_SEED_STATE = {
+window.VFU_SEED_STATE = {
   "institution": {
     "name": "VFU E-Learning Classroom",
     "tagline": "Interactive learning, attendance, collaboration, and academic monitoring.",
@@ -11,7 +11,21 @@
       "email": "student@vfu.local",
       "role": "student",
       "program": "BSc Information and Communication Technology",
-      "avatar": "AL"
+      "studentNumber": "VFU-ST-2026-001",
+      "avatar": "AL",
+      "createdAt": "2026-01-12T08:00:00.000Z",
+      "pendingBalance": 2500
+    },
+    {
+      "id": "u-student-2",
+      "name": "Bwalya Mwansa",
+      "email": "bwalya@vfu.local",
+      "role": "student",
+      "program": "BSc Business and Financial Management",
+      "studentNumber": "VFU-ST-2026-002",
+      "avatar": "BM",
+      "createdAt": "2026-01-15T08:00:00.000Z",
+      "pendingBalance": 1800
     },
     {
       "id": "u-lecturer-1",
@@ -19,7 +33,8 @@
       "email": "lecturer@vfu.local",
       "role": "lecturer",
       "program": "School of ICT",
-      "avatar": "NB"
+      "avatar": "NB",
+      "createdAt": "2025-09-01T08:00:00.000Z"
     },
     {
       "id": "u-admin-1",
@@ -27,7 +42,8 @@
       "email": "admin@vfu.local",
       "role": "admin",
       "program": "Academic Registry",
-      "avatar": "SA"
+      "avatar": "SA",
+      "createdAt": "2025-09-01T08:00:00.000Z"
     }
   ],
   "courses": [
@@ -40,6 +56,7 @@
       "progress": 72,
       "color": "#2563eb",
       "schedule": "Mon and Wed, 09:00",
+      "nextUp": "Week 4 - REST APIs Lab",
       "room": "Virtual Room A",
       "enrolled": 42
     },
@@ -52,6 +69,7 @@
       "progress": 58,
       "color": "#059669",
       "schedule": "Tue, 11:00",
+      "nextUp": "Week 3 - Normalization",
       "room": "Virtual Room B",
       "enrolled": 38
     },
@@ -64,25 +82,40 @@
       "progress": 64,
       "color": "#d97706",
       "schedule": "Thu, 14:00",
+      "nextUp": "Week 3 - Routing Practical",
       "room": "Virtual Lab",
       "enrolled": 45
+    },
+    {
+      "id": "course-fin",
+      "code": "BFM 210",
+      "title": "Financial Accounting",
+      "lecturerId": "u-lecturer-1",
+      "department": "Business and Financial Management",
+      "progress": 47,
+      "color": "#7c3aed",
+      "schedule": "Fri, 10:00",
+      "nextUp": "Week 3 - Ledgers and Trial Balance",
+      "room": "Virtual Room C",
+      "enrolled": 31
     }
   ],
   "classSessions": [
     {
-      "id": "session-live",
+      "id": "session-past",
       "courseId": "course-web",
       "title": "REST APIs and secure session design",
       "startsAt": "2026-06-21T17:30:00.000Z",
       "duration": 90,
-      "status": "Live",
+      "status": "Ended",
+      "endedAt": "2026-06-21T19:00:00.000Z",
       "participants": 34
     },
     {
       "id": "session-next",
       "courseId": "course-db",
       "title": "Normalization and relational integrity",
-      "startsAt": "2026-06-22T08:00:00.000Z",
+      "startsAt": "2026-07-15T08:00:00.000Z",
       "duration": 75,
       "status": "Scheduled",
       "participants": 0
@@ -91,7 +124,7 @@
   "attendance": [
     {
       "id": "att-1",
-      "sessionId": "session-live",
+      "sessionId": "session-past",
       "courseId": "course-web",
       "userId": "u-student-1",
       "status": "Present",
@@ -103,7 +136,8 @@
       "id": "assignment-api",
       "courseId": "course-web",
       "title": "Build a secure course API",
-      "dueAt": "2026-06-25T23:59:00.000Z",
+      "description": "Design and implement a small REST API with login, role checks, and validation. Submit your source files and a short write-up.",
+      "dueAt": "2026-07-20T23:59:00.000Z",
       "points": 20,
       "status": "Open"
     },
@@ -111,7 +145,8 @@
       "id": "assignment-er",
       "courseId": "course-db",
       "title": "E-learning database ER diagram",
-      "dueAt": "2026-06-28T23:59:00.000Z",
+      "description": "Model the e-learning platform as an entity relationship diagram covering users, courses, sessions, and submissions.",
+      "dueAt": "2026-07-22T23:59:00.000Z",
       "points": 15,
       "status": "Open"
     },
@@ -119,9 +154,10 @@
       "id": "assignment-routing",
       "courseId": "course-net",
       "title": "Network routing practical",
-      "dueAt": "2026-07-02T23:59:00.000Z",
+      "description": "Complete the routing lab worksheet and attach your configuration files.",
+      "dueAt": "2026-07-25T23:59:00.000Z",
       "points": 10,
-      "status": "Draft"
+      "status": "Open"
     }
   ],
   "submissions": [
@@ -131,6 +167,10 @@
       "courseId": "course-db",
       "userId": "u-student-1",
       "text": "Initial ER model submitted for review.",
+      "fileName": "",
+      "fileType": "",
+      "fileSize": 0,
+      "fileData": "",
       "status": "Submitted",
       "grade": 13,
       "submittedAt": "2026-06-18T15:20:00.000Z"
@@ -160,19 +200,20 @@
       ]
     }
   ],
+  "studyRooms": [],
   "notifications": [
     {
       "id": "note-1",
-      "title": "Live class in progress",
-      "body": "Web Application Development is live. Attendance is open.",
-      "type": "classroom",
+      "title": "New assignment posted",
+      "body": "Build a secure course API is due on 20 July 2026.",
+      "type": "assignment",
       "read": false
     },
     {
       "id": "note-2",
-      "title": "Assignment deadline",
-      "body": "Secure course API is due on 25 June 2026.",
-      "type": "assignment",
+      "title": "Upcoming class",
+      "body": "Normalization and relational integrity is scheduled for 15 July 2026.",
+      "type": "classroom",
       "read": false
     }
   ],
@@ -182,7 +223,7 @@
     "submissionRate": 74,
     "averageGrade": 79,
     "weeklyEngagement": [64, 72, 68, 81, 77, 88, 84],
-    "courseCompletion": [72, 58, 64]
+    "courseCompletion": [72, 58, 64, 47]
   }
 }
 ;
