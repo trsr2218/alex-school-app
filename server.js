@@ -74,7 +74,32 @@ function authenticate(req, data) {
   const now = Date.now();
   const session = (data.sessions || []).find((item) => item.token === match[1] && item.expiresAt > now);
   if (!session) return null;
-  return { user: { id: session.userId, role: session.role, name: session.name, email: session.email }, session };
+  // Role is re-resolved from the live user record (not the session snapshot) so an
+  // admin-driven role change takes effect immediately, not after the token expires.
+  const liveUser = data.users.find((item) => item.id === session.userId);
+  const role = liveUser ? liveUser.role : session.role;
+  const name = liveUser ? liveUser.name : session.name;
+  const email = liveUser ? liveUser.email : session.email;
+  return { user: { id: session.userId, role, name, email }, session };
+}
+
+const STAFF_ROLES = ["lecturer", "admin"];
+
+function requireSession(req, res, data) {
+  const auth = authenticate(req, data);
+  if (!auth) {
+    sendJson(res, 401, { error: "Sign in required." });
+    return null;
+  }
+  return auth;
+}
+
+function requireRole(auth, res, allowedRoles) {
+  if (!allowedRoles.includes(auth.user.role)) {
+    sendJson(res, 403, { error: "You do not have permission to perform this action." });
+    return false;
+  }
+  return true;
 }
 
 const rateLimitBuckets = new Map();
@@ -108,6 +133,7 @@ function mapDbUser(row) {
     email: row.email,
     role: row.role,
     program: row.program || "VFU",
+    programId: row.program_id || null,
     studentNumber: row.student_number || "",
     staffNumber: row.staff_number || "",
     phone: row.phone || "",
@@ -124,6 +150,7 @@ async function ensureUsersTableSchema(pool) {
       email VARCHAR(255) NOT NULL UNIQUE,
       role VARCHAR(32) NOT NULL,
       program VARCHAR(255),
+      program_id VARCHAR(64),
       student_number VARCHAR(100),
       staff_number VARCHAR(100),
       phone VARCHAR(100),
@@ -137,6 +164,7 @@ async function ensureUsersTableSchema(pool) {
   const columnNames = new Set(columns.map((column) => column.Field));
   const migrations = [
     ["program", "ALTER TABLE users ADD COLUMN program VARCHAR(255)"],
+    ["program_id", "ALTER TABLE users ADD COLUMN program_id VARCHAR(64)"],
     ["student_number", "ALTER TABLE users ADD COLUMN student_number VARCHAR(100)"],
     ["staff_number", "ALTER TABLE users ADD COLUMN staff_number VARCHAR(100)"],
     ["phone", "ALTER TABLE users ADD COLUMN phone VARCHAR(100)"],
@@ -174,6 +202,7 @@ async function getDbPool() {
         email: "student@vfu.local",
         role: "student",
         program: "BSc Information and Communication Technology",
+        program_id: "prog-ict",
         student_number: "VFU-ST-2026-001",
         staff_number: null,
         phone: "",
@@ -186,6 +215,7 @@ async function getDbPool() {
         email: "lecturer@vfu.local",
         role: "lecturer",
         program: "School of ICT",
+        program_id: "prog-ict",
         student_number: null,
         staff_number: "VFU-LEC-2026-001",
         phone: "",
@@ -198,6 +228,7 @@ async function getDbPool() {
         email: "admin@vfu.local",
         role: "admin",
         program: "Academic Registry",
+        program_id: null,
         student_number: null,
         staff_number: "VFU-ADM-2026-001",
         phone: "",
@@ -208,18 +239,19 @@ async function getDbPool() {
 
     for (const user of demoUsers) {
       await dbPool.query(
-        `INSERT INTO users (id, name, email, role, program, student_number, staff_number, phone, avatar, password_hash)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO users (id, name, email, role, program, program_id, student_number, staff_number, phone, avatar, password_hash)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON DUPLICATE KEY UPDATE
            name = VALUES(name),
            role = VALUES(role),
            program = VALUES(program),
+           program_id = VALUES(program_id),
            student_number = VALUES(student_number),
            staff_number = VALUES(staff_number),
            phone = VALUES(phone),
            avatar = VALUES(avatar),
            password_hash = VALUES(password_hash)`,
-        [user.id, user.name, user.email, user.role, user.program, user.student_number, user.staff_number, user.phone, user.avatar, user.password_hash]
+        [user.id, user.name, user.email, user.role, user.program, user.program_id, user.student_number, user.staff_number, user.phone, user.avatar, user.password_hash]
       );
     }
 
@@ -236,6 +268,10 @@ const defaultData = {
     tagline: "Interactive learning, attendance, collaboration, and academic monitoring.",
     term: "June 2026 Semester"
   },
+  programs: [
+    { id: "prog-ict", name: "Information and Communication Technology", code: "ICT" },
+    { id: "prog-biz", name: "Business and Financial Management", code: "BIZ" }
+  ],
   users: [
     {
       id: "u-student-1",
@@ -285,10 +321,42 @@ const defaultData = {
   }
 };
 
+// One-time-per-read migration helper: maps the legacy free-text program/department
+// string to a broad academic field, used only to backfill programId on old records.
+function legacyFieldForProgram(value) {
+  const text = String(value || "").toLowerCase();
+  if (/(ict|information|computer|software|network|technolog)/.test(text)) return "ICT";
+  if (/(business|financial|account|management|marketing)/.test(text)) return "Business";
+  return null;
+}
+
+function backfillPrograms(shaped) {
+  const byCode = new Map(shaped.programs.map((program) => [program.code, program]));
+  const legacyToProgramId = { ICT: byCode.get("ICT")?.id || null, Business: byCode.get("BIZ")?.id || null };
+
+  for (const user of shaped.users) {
+    if (!user.programId) {
+      const field = legacyFieldForProgram(user.program);
+      user.programId = field ? legacyToProgramId[field] : null;
+    }
+  }
+
+  for (const course of shaped.courses) {
+    if (course.parentCourseId === undefined) course.parentCourseId = null;
+    if (!course.programId) {
+      const field = legacyFieldForProgram(course.department);
+      course.programId = field ? legacyToProgramId[field] : null;
+    }
+  }
+
+  return shaped;
+}
+
 function ensureDataShape(data) {
   const normalized = data && typeof data === "object" ? data : {};
-  return {
+  const shaped = {
     institution: normalized.institution || defaultData.institution,
+    programs: Array.isArray(normalized.programs) && normalized.programs.length ? normalized.programs : defaultData.programs,
     users: Array.isArray(normalized.users) ? normalized.users : [],
     courses: Array.isArray(normalized.courses) ? normalized.courses : [],
     classSessions: Array.isArray(normalized.classSessions) ? normalized.classSessions : [],
@@ -301,6 +369,7 @@ function ensureDataShape(data) {
     sessions: Array.isArray(normalized.sessions) ? normalized.sessions : [],
     analytics: normalized.analytics && typeof normalized.analytics === "object" ? normalized.analytics : defaultData.analytics
   };
+  return backfillPrograms(shaped);
 }
 
 function readData() {
@@ -388,20 +457,13 @@ function normalizeRole(value) {
   return role === "lecturer" || role === "admin" ? role : "student";
 }
 
-// Maps a free-text program/department string to a broad academic field so
-// students only see and join courses in their own field (client requirement).
-function fieldForProgram(value) {
-  const text = String(value || "").toLowerCase();
-  if (/(ict|information|computer|software|network|technolog)/.test(text)) return "ICT";
-  if (/(business|financial|account|management|marketing)/.test(text)) return "Business";
-  return null;
-}
-
+// Strict program access: a student can only see/join a course when both records
+// carry the same programId. Missing programId on either side denies access
+// (never falls back to "allow everything", unlike the old free-text heuristic).
 function canAccessCourse(user, course) {
-  if (!user || user.role !== "student" || !course) return true;
-  const studentField = fieldForProgram(user.program);
-  const courseField = fieldForProgram(course.department);
-  return !studentField || !courseField || studentField === courseField;
+  if (!user || user.role !== "student") return true;
+  if (!course) return false;
+  return Boolean(user.programId) && Boolean(course.programId) && user.programId === course.programId;
 }
 
 function publicFilePath(urlPath) {
@@ -462,83 +524,63 @@ async function handleLogin(res, data, body) {
   sendJson(res, 200, { user: stripPasswordHash(fallbackUser), token: issueSession(data, fallbackUser) });
 }
 
-async function handleSignup(res, data, body) {
-  const name = sanitizeText(body.name);
-  const email = sanitizeText(body.email).toLowerCase();
-  // Public self-registration is student-only. Elevated roles (lecturer/admin)
-  // must be provisioned by an existing admin, not chosen by the signup caller —
-  // otherwise anyone can register themselves as an admin.
-  const role = "student";
-  const password = String(body.password || "");
+// Shared account-creation logic used by both public signup (role forced to
+// "student") and the admin-only provisioning endpoint (role from the caller).
+// Handles the MySQL path when enabled, falling back to the JSON users array.
+async function createUserRecord(data, input) {
+  const name = sanitizeText(input.name);
+  const email = sanitizeText(input.email).toLowerCase();
+  const role = normalizeRole(input.role);
+  const password = String(input.password || "");
 
-  if (!name || !email) {
-    sendJson(res, 400, { error: "Name and email are required." });
-    return;
-  }
-
-  if (!isValidEmail(email)) {
-    sendJson(res, 400, { error: "Please provide a valid email address." });
-    return;
-  }
-
+  if (!name || !email) return { status: 400, error: "Name and email are required." };
+  if (!isValidEmail(email)) return { status: 400, error: "Please provide a valid email address." };
   const pwdError = validatePassword(password);
-  if (pwdError) {
-    sendJson(res, 400, { error: pwdError });
-    return;
-  }
+  if (pwdError) return { status: 400, error: pwdError };
+
+  const program = sanitizeText(input.program || input.department || "VFU");
+  const programId = sanitizeText(input.programId) || null;
+  const studentNumber = sanitizeText(input.studentNumber);
+  const staffNumber = sanitizeText(input.staffNumber);
+  const phone = sanitizeText(input.phone);
+  const initials = name.split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0].toUpperCase()).join("") || "VU";
 
   const pool = await getDbPool();
   if (pool) {
     try {
       const [existingRows] = await pool.query("SELECT id FROM users WHERE email = ? LIMIT 1", [email]);
-      if (existingRows[0]) {
-        sendJson(res, 409, { error: "An account with that email already exists." });
-        return;
-      }
+      if (existingRows[0]) return { status: 409, error: "An account with that email already exists." };
 
-      const initials = name.split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0].toUpperCase()).join("") || "VU";
       const userId = `u-${role}-${Date.now()}`;
       await pool.query(
-        `INSERT INTO users (id, name, email, role, program, student_number, staff_number, phone, avatar, password_hash)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [userId, name, email, role, sanitizeText(body.program || body.department || "VFU"), sanitizeText(body.studentNumber), sanitizeText(body.staffNumber), sanitizeText(body.phone), initials, hashPassword(password)]
+        `INSERT INTO users (id, name, email, role, program, program_id, student_number, staff_number, phone, avatar, password_hash)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [userId, name, email, role, program, programId, studentNumber, staffNumber, phone, initials, hashPassword(password)]
       );
 
-      const user = {
-        id: userId,
-        name,
-        email,
-        role,
-        program: sanitizeText(body.program || body.department || "VFU"),
-        studentNumber: sanitizeText(body.studentNumber),
-        staffNumber: sanitizeText(body.staffNumber),
-        phone: sanitizeText(body.phone),
-        avatar: initials,
-        createdAt: new Date().toISOString()
+      return {
+        status: 201,
+        user: { id: userId, name, email, role, program, programId, studentNumber, staffNumber, phone, avatar: initials, createdAt: new Date().toISOString() }
       };
-
-      sendJson(res, 201, { user, token: issueSession(data, user) });
-      return;
     } catch (error) {
-      console.warn("MySQL signup insert failed:", error.message);
+      console.warn("MySQL user insert failed:", error.message);
     }
   }
 
   if (data.users.some((candidate) => candidate.email.toLowerCase() === email)) {
-    sendJson(res, 409, { error: "An account with that email already exists." });
-    return;
+    return { status: 409, error: "An account with that email already exists." };
   }
 
-  const initials = name.split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0].toUpperCase()).join("") || "VU";
   const user = {
     id: `u-${role}-${Date.now()}`,
     name,
     email,
     role,
-    program: sanitizeText(body.program || body.department || "VFU"),
-    studentNumber: sanitizeText(body.studentNumber),
-    staffNumber: sanitizeText(body.staffNumber),
-    phone: sanitizeText(body.phone),
+    program,
+    programId,
+    studentNumber,
+    staffNumber,
+    phone,
     avatar: initials,
     passwordHash: hashPassword(password),
     createdAt: new Date().toISOString()
@@ -546,7 +588,152 @@ async function handleSignup(res, data, body) {
 
   data.users.push(user);
   writeData(data);
-  sendJson(res, 201, { user: stripPasswordHash(user), token: issueSession(data, user) });
+  return { status: 201, user };
+}
+
+async function handleSignup(res, data, body) {
+  // Public self-registration is student-only. Elevated roles (lecturer/admin)
+  // must be provisioned by an existing admin via POST /api/admin/users, not
+  // chosen by the signup caller — otherwise anyone can register as an admin.
+  const result = await createUserRecord(data, { ...body, role: "student" });
+  if (result.error) {
+    sendJson(res, result.status, { error: result.error });
+    return;
+  }
+  sendJson(res, 201, { user: stripPasswordHash(result.user), token: issueSession(data, result.user) });
+}
+
+// Admin-only: the sole path in the app that can create a lecturer or admin account.
+async function createStaffUser(res, data, body) {
+  const result = await createUserRecord(data, body);
+  if (result.error) {
+    sendJson(res, result.status, { error: result.error });
+    return;
+  }
+  sendJson(res, 201, { user: stripPasswordHash(result.user) });
+}
+
+function isValidAvatar(value) {
+  if (typeof value !== "string") return false;
+  if (/^[A-Za-z]{1,3}$/.test(value)) return true;
+  return value.startsWith("data:image/") && value.length <= 300_000;
+}
+
+// Self-service profile edit: every field except avatar is ignored, even if present
+// in the body. Everything else requires an admin via updateUserRecord below.
+async function updateOwnProfile(res, data, authUser, body) {
+  if (body.avatar === undefined || !isValidAvatar(body.avatar)) {
+    sendJson(res, 400, { error: "Provide an avatar as initials or a small image (max 300KB)." });
+    return;
+  }
+
+  const pool = await getDbPool();
+  if (pool) {
+    try {
+      const [rows] = await pool.query("SELECT * FROM users WHERE id = ? LIMIT 1", [authUser.id]);
+      if (rows[0]) {
+        await pool.query("UPDATE users SET avatar = ? WHERE id = ?", [body.avatar, authUser.id]);
+        const [updatedRows] = await pool.query("SELECT * FROM users WHERE id = ? LIMIT 1", [authUser.id]);
+        sendJson(res, 200, { user: mapDbUser(updatedRows[0]) });
+        return;
+      }
+    } catch (error) {
+      console.warn("MySQL profile update failed:", error.message);
+    }
+  }
+
+  const user = data.users.find((item) => item.id === authUser.id);
+  if (!user) {
+    sendJson(res, 404, { error: "User was not found." });
+    return;
+  }
+  user.avatar = body.avatar;
+  writeData(data);
+  sendJson(res, 200, { user: stripPasswordHash(user) });
+}
+
+// Admin-only full edit. This is the sole place a user's role can change after
+// account creation, so every caller of this function must already be admin-gated.
+async function updateUserRecord(res, data, userId, body) {
+  if (body.programId !== undefined && body.programId && !data.programs.some((program) => program.id === body.programId)) {
+    sendJson(res, 400, { error: "Program was not found." });
+    return;
+  }
+  if (body.password !== undefined) {
+    const pwdError = validatePassword(body.password);
+    if (pwdError) {
+      sendJson(res, 400, { error: pwdError });
+      return;
+    }
+  }
+  let email = null;
+  if (body.email !== undefined) {
+    email = sanitizeText(body.email).toLowerCase();
+    if (!isValidEmail(email)) {
+      sendJson(res, 400, { error: "Please provide a valid email address." });
+      return;
+    }
+  }
+
+  const pool = await getDbPool();
+  if (pool) {
+    try {
+      const [rows] = await pool.query("SELECT * FROM users WHERE id = ? LIMIT 1", [userId]);
+      if (rows[0]) {
+        if (email) {
+          const [existing] = await pool.query("SELECT id FROM users WHERE email = ? AND id <> ? LIMIT 1", [email, userId]);
+          if (existing[0]) {
+            sendJson(res, 409, { error: "Another account already uses that email." });
+            return;
+          }
+        }
+        const fieldToColumn = { name: "name", program: "program", programId: "program_id", studentNumber: "student_number", staffNumber: "staff_number", phone: "phone", avatar: "avatar" };
+        const sets = [];
+        const values = [];
+        for (const [field, column] of Object.entries(fieldToColumn)) {
+          if (body[field] !== undefined) {
+            sets.push(`${column} = ?`);
+            values.push(sanitizeText(body[field]) || null);
+          }
+        }
+        if (email) { sets.push("email = ?"); values.push(email); }
+        if (body.role !== undefined) { sets.push("role = ?"); values.push(normalizeRole(body.role)); }
+        if (body.password) { sets.push("password_hash = ?"); values.push(hashPassword(body.password)); }
+        if (sets.length) {
+          values.push(userId);
+          await pool.query(`UPDATE users SET ${sets.join(", ")} WHERE id = ?`, values);
+        }
+        const [updatedRows] = await pool.query("SELECT * FROM users WHERE id = ? LIMIT 1", [userId]);
+        sendJson(res, 200, { user: mapDbUser(updatedRows[0]) });
+        return;
+      }
+    } catch (error) {
+      console.warn("MySQL user update failed:", error.message);
+    }
+  }
+
+  const user = data.users.find((item) => item.id === userId);
+  if (!user) {
+    sendJson(res, 404, { error: "User was not found." });
+    return;
+  }
+
+  if (email) {
+    if (data.users.some((candidate) => candidate.id !== userId && candidate.email.toLowerCase() === email)) {
+      sendJson(res, 409, { error: "Another account already uses that email." });
+      return;
+    }
+    user.email = email;
+  }
+  if (body.programId !== undefined) user.programId = sanitizeText(body.programId) || null;
+  if (body.role !== undefined) user.role = normalizeRole(body.role);
+  if (body.password) user.passwordHash = hashPassword(body.password);
+  for (const field of ["name", "program", "studentNumber", "staffNumber", "phone", "avatar"]) {
+    if (body[field] !== undefined) user[field] = sanitizeText(body[field]);
+  }
+
+  writeData(data);
+  sendJson(res, 200, { user: stripPasswordHash(user) });
 }
 
 function addAttendance(res, data, body) {
@@ -857,6 +1044,26 @@ function addForumMessage(res, data, body) {
   sendJson(res, 200, { discussions: data.discussions, message: "Reply posted." });
 }
 
+function createProgram(res, data, body) {
+  const name = sanitizeText(body.name);
+  const code = sanitizeText(body.code).toUpperCase();
+
+  if (!name || !code) {
+    sendJson(res, 400, { error: "Program name and code are required." });
+    return;
+  }
+
+  if (data.programs.some((program) => program.code.toUpperCase() === code)) {
+    sendJson(res, 409, { error: "A program with that code already exists." });
+    return;
+  }
+
+  const program = { id: `prog-${Date.now()}`, name, code };
+  data.programs.push(program);
+  writeData(data);
+  sendJson(res, 201, { program, programs: data.programs });
+}
+
 function createCourse(res, data, body) {
   const title = sanitizeText(body.title);
   const code = sanitizeText(body.code).toUpperCase();
@@ -866,12 +1073,27 @@ function createCourse(res, data, body) {
     return;
   }
 
+  const parentCourse = body.parentCourseId ? data.courses.find((item) => item.id === body.parentCourseId) : null;
+  if (body.parentCourseId && !parentCourse) {
+    sendJson(res, 400, { error: "Parent course was not found." });
+    return;
+  }
+
+  let programId = sanitizeText(body.programId) || null;
+  if (programId && !data.programs.some((program) => program.id === programId)) {
+    sendJson(res, 400, { error: "Program was not found." });
+    return;
+  }
+  if (!programId && parentCourse) programId = parentCourse.programId || null;
+
   const course = {
     id: `course-${Date.now()}`,
     code,
     title,
     lecturerId: sanitizeText(body.lecturerId) || data.users.find((user) => user.role === "lecturer")?.id || "u-lecturer-1",
     department: sanitizeText(body.department || "ICT"),
+    programId,
+    parentCourseId: parentCourse ? parentCourse.id : null,
     progress: 0,
     color: "#2563eb",
     schedule: sanitizeText(body.schedule || "Not scheduled"),
@@ -882,6 +1104,62 @@ function createCourse(res, data, body) {
   data.courses.push(course);
   writeData(data);
   sendJson(res, 201, { course, courses: data.courses });
+}
+
+function updateCourse(res, data, courseId, body, authUser) {
+  const course = data.courses.find((item) => item.id === courseId);
+  if (!course) {
+    sendJson(res, 404, { error: "Course was not found." });
+    return;
+  }
+
+  if (authUser.role === "lecturer" && course.lecturerId !== authUser.id) {
+    sendJson(res, 403, { error: "You can only edit courses assigned to you." });
+    return;
+  }
+
+  if (body.programId !== undefined) {
+    const programId = sanitizeText(body.programId) || null;
+    if (programId && !data.programs.some((program) => program.id === programId)) {
+      sendJson(res, 400, { error: "Program was not found." });
+      return;
+    }
+    course.programId = programId;
+  }
+
+  if (body.parentCourseId !== undefined) {
+    const parentId = sanitizeText(body.parentCourseId) || null;
+    if (parentId && (parentId === course.id || !data.courses.some((item) => item.id === parentId))) {
+      sendJson(res, 400, { error: "Parent course was not found." });
+      return;
+    }
+    course.parentCourseId = parentId;
+  }
+
+  if (body.lecturerId !== undefined) {
+    const lecturerId = sanitizeText(body.lecturerId);
+    const lecturer = data.users.find((user) => user.id === lecturerId && (user.role === "lecturer" || user.role === "admin"));
+    if (!lecturer) {
+      sendJson(res, 400, { error: "Reassignment target must be an existing lecturer or admin." });
+      return;
+    }
+    course.lecturerId = lecturerId;
+  }
+
+  for (const field of ["title", "code", "schedule", "room", "nextUp", "department"]) {
+    if (body[field] !== undefined) {
+      const value = sanitizeText(body[field]);
+      course[field] = field === "code" ? value.toUpperCase() : value;
+    }
+  }
+
+  if (body.progress !== undefined) {
+    const progress = Number(body.progress);
+    if (Number.isFinite(progress)) course.progress = Math.max(0, Math.min(100, progress));
+  }
+
+  writeData(data);
+  sendJson(res, 200, { course, courses: data.courses });
 }
 
 function publicState(data) {
@@ -898,13 +1176,16 @@ async function handleApi(req, res) {
     const data = readData();
     const body = await readBody(req);
     const clientIp = req.socket.remoteAddress || "unknown";
+    const pathname = req.url.split("?")[0];
+    const courseIdMatch = /^\/api\/courses\/([\w-]+)$/.exec(pathname);
+    const userIdMatch = /^\/api\/users\/([\w-]+)$/.exec(pathname);
 
-    if (req.method === "GET" && req.url === "/api/state") {
+    if (req.method === "GET" && pathname === "/api/state") {
       sendJson(res, 200, publicState(data));
       return;
     }
 
-    if (req.method === "POST" && req.url === "/api/login") {
+    if (req.method === "POST" && pathname === "/api/login") {
       if (isRateLimited(`login:${clientIp}`)) {
         sendJson(res, 429, { error: "Too many attempts. Please try again in a few minutes." });
         return;
@@ -913,7 +1194,7 @@ async function handleApi(req, res) {
       return;
     }
 
-    if (req.method === "POST" && req.url === "/api/signup") {
+    if (req.method === "POST" && pathname === "/api/signup") {
       if (isRateLimited(`signup:${clientIp}`)) {
         sendJson(res, 429, { error: "Too many attempts. Please try again in a few minutes." });
         return;
@@ -922,7 +1203,7 @@ async function handleApi(req, res) {
       return;
     }
 
-    if (req.method === "POST" && req.url === "/api/logout") {
+    if (req.method === "POST" && pathname === "/api/logout") {
       const auth = authenticate(req, data);
       if (auth) {
         data.sessions = (data.sessions || []).filter((session) => session.token !== auth.session.token);
@@ -932,12 +1213,8 @@ async function handleApi(req, res) {
       return;
     }
 
-    if (req.method === "POST" && req.url === "/api/attendance") {
-      const auth = authenticate(req, data);
-      if (!auth) {
-        sendJson(res, 401, { error: "Sign in required." });
-        return;
-      }
+    if (req.method === "POST" && pathname === "/api/attendance") {
+      const auth = requireSession(req, res, data); if (!auth) return;
       if (auth.user.role === "student" && auth.user.id !== body.userId) {
         sendJson(res, 403, { error: "You can only mark your own attendance." });
         return;
@@ -946,12 +1223,8 @@ async function handleApi(req, res) {
       return;
     }
 
-    if (req.method === "POST" && req.url === "/api/submissions") {
-      const auth = authenticate(req, data);
-      if (!auth) {
-        sendJson(res, 401, { error: "Sign in required." });
-        return;
-      }
+    if (req.method === "POST" && pathname === "/api/submissions") {
+      const auth = requireSession(req, res, data); if (!auth) return;
       if (auth.user.id !== body.userId) {
         sendJson(res, 403, { error: "You can only submit your own work." });
         return;
@@ -960,12 +1233,8 @@ async function handleApi(req, res) {
       return;
     }
 
-    if (req.method === "POST" && req.url === "/api/discussions/reply") {
-      const auth = authenticate(req, data);
-      if (!auth) {
-        sendJson(res, 401, { error: "Sign in required." });
-        return;
-      }
+    if (req.method === "POST" && pathname === "/api/discussions/reply") {
+      const auth = requireSession(req, res, data); if (!auth) return;
       if (auth.user.id !== body.userId) {
         sendJson(res, 403, { error: "You can only post as yourself." });
         return;
@@ -974,98 +1243,88 @@ async function handleApi(req, res) {
       return;
     }
 
-    if (req.method === "POST" && req.url === "/api/courses") {
-      const auth = authenticate(req, data);
-      if (!auth) {
-        sendJson(res, 401, { error: "Sign in required." });
-        return;
-      }
-      if (auth.user.role !== "lecturer" && auth.user.role !== "admin") {
-        sendJson(res, 403, { error: "Only lecturers and admins can create courses." });
-        return;
-      }
+    if (req.method === "POST" && pathname === "/api/courses") {
+      const auth = requireSession(req, res, data); if (!auth) return;
+      if (!requireRole(auth, res, STAFF_ROLES)) return;
       createCourse(res, data, body);
       return;
     }
 
-    if (req.method === "POST" && req.url === "/api/assignments") {
-      const auth = authenticate(req, data);
-      if (!auth) {
-        sendJson(res, 401, { error: "Sign in required." });
-        return;
-      }
-      if (auth.user.role !== "lecturer" && auth.user.role !== "admin") {
-        sendJson(res, 403, { error: "Only lecturers can create assignments." });
-        return;
-      }
+    if (req.method === "PATCH" && courseIdMatch) {
+      const auth = requireSession(req, res, data); if (!auth) return;
+      if (!requireRole(auth, res, STAFF_ROLES)) return;
+      updateCourse(res, data, courseIdMatch[1], body, auth.user);
+      return;
+    }
+
+    if (req.method === "POST" && pathname === "/api/programs") {
+      const auth = requireSession(req, res, data); if (!auth) return;
+      if (!requireRole(auth, res, STAFF_ROLES)) return;
+      createProgram(res, data, body);
+      return;
+    }
+
+    if (req.method === "POST" && pathname === "/api/admin/users") {
+      const auth = requireSession(req, res, data); if (!auth) return;
+      if (!requireRole(auth, res, ["admin"])) return;
+      await createStaffUser(res, data, body);
+      return;
+    }
+
+    if (req.method === "PATCH" && pathname === "/api/profile") {
+      const auth = requireSession(req, res, data); if (!auth) return;
+      await updateOwnProfile(res, data, auth.user, body);
+      return;
+    }
+
+    if (req.method === "PATCH" && userIdMatch) {
+      const auth = requireSession(req, res, data); if (!auth) return;
+      if (!requireRole(auth, res, ["admin"])) return;
+      await updateUserRecord(res, data, userIdMatch[1], body);
+      return;
+    }
+
+    if (req.method === "POST" && pathname === "/api/assignments") {
+      const auth = requireSession(req, res, data); if (!auth) return;
+      if (!requireRole(auth, res, STAFF_ROLES)) return;
       createAssignment(res, data, body);
       return;
     }
 
-    if (req.method === "POST" && req.url === "/api/sessions/start") {
-      const auth = authenticate(req, data);
-      if (!auth) {
-        sendJson(res, 401, { error: "Sign in required." });
-        return;
-      }
-      if (auth.user.role !== "lecturer" && auth.user.role !== "admin") {
-        sendJson(res, 403, { error: "Only lecturers can start a live class." });
-        return;
-      }
+    if (req.method === "POST" && pathname === "/api/sessions/start") {
+      const auth = requireSession(req, res, data); if (!auth) return;
+      if (!requireRole(auth, res, STAFF_ROLES)) return;
       startClassSession(res, data, body, auth.user);
       return;
     }
 
-    if (req.method === "POST" && req.url === "/api/sessions/join") {
-      const auth = authenticate(req, data);
-      if (!auth) {
-        sendJson(res, 401, { error: "Sign in required." });
-        return;
-      }
+    if (req.method === "POST" && pathname === "/api/sessions/join") {
+      const auth = requireSession(req, res, data); if (!auth) return;
       joinClassSession(res, data, body, auth.user);
       return;
     }
 
-    if (req.method === "POST" && req.url === "/api/sessions/end") {
-      const auth = authenticate(req, data);
-      if (!auth) {
-        sendJson(res, 401, { error: "Sign in required." });
-        return;
-      }
-      if (auth.user.role !== "lecturer" && auth.user.role !== "admin") {
-        sendJson(res, 403, { error: "Only lecturers can end a live class." });
-        return;
-      }
+    if (req.method === "POST" && pathname === "/api/sessions/end") {
+      const auth = requireSession(req, res, data); if (!auth) return;
+      if (!requireRole(auth, res, STAFF_ROLES)) return;
       endClassSession(res, data, body);
       return;
     }
 
-    if (req.method === "POST" && req.url === "/api/studyrooms") {
-      const auth = authenticate(req, data);
-      if (!auth) {
-        sendJson(res, 401, { error: "Sign in required." });
-        return;
-      }
+    if (req.method === "POST" && pathname === "/api/studyrooms") {
+      const auth = requireSession(req, res, data); if (!auth) return;
       createStudyRoom(res, data, body, auth.user);
       return;
     }
 
-    if (req.method === "POST" && req.url === "/api/studyrooms/join") {
-      const auth = authenticate(req, data);
-      if (!auth) {
-        sendJson(res, 401, { error: "Sign in required." });
-        return;
-      }
+    if (req.method === "POST" && pathname === "/api/studyrooms/join") {
+      const auth = requireSession(req, res, data); if (!auth) return;
       joinStudyRoom(res, data, body, auth.user);
       return;
     }
 
-    if (req.method === "POST" && req.url === "/api/studyrooms/close") {
-      const auth = authenticate(req, data);
-      if (!auth) {
-        sendJson(res, 401, { error: "Sign in required." });
-        return;
-      }
+    if (req.method === "POST" && pathname === "/api/studyrooms/close") {
+      const auth = requireSession(req, res, data); if (!auth) return;
       closeStudyRoom(res, data, body, auth.user);
       return;
     }

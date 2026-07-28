@@ -3,21 +3,46 @@
   const originalFetch = window.fetch.bind(window);
   const storageKey = "vfu-offline-state";
   const clone = (value) => JSON.parse(JSON.stringify(value));
-  const readState = () => JSON.parse(localStorage.getItem(storageKey) || JSON.stringify(clone(window.VFU_SEED_STATE)));
-  const saveState = (data) => localStorage.setItem(storageKey, JSON.stringify(data));
-  const initials = (name) => String(name || "VFU").split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0].toUpperCase()).join("") || "VU";
-  const jsonResponse = (payload, status = 200) => new Response(JSON.stringify(payload), { status, headers: { "content-type": "application/json; charset=utf-8" } });
-
-  const fieldFor = (value) => {
+  const legacyFieldFor = (value) => {
     const text = String(value || "").toLowerCase();
     if (/(ict|information|computer|software|network|technolog)/.test(text)) return "ICT";
     if (/(business|financial|account|management|marketing)/.test(text)) return "Business";
     return null;
   };
+  const initials = (name) => String(name || "VFU").split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0].toUpperCase()).join("") || "VU";
+  const jsonResponse = (payload, status = 200) => new Response(JSON.stringify(payload), { status, headers: { "content-type": "application/json; charset=utf-8" } });
+
+  // Backfills programs/programId onto offline localStorage blobs seeded before
+  // this feature shipped, mirroring the server's ensureDataShape/backfillPrograms.
+  const backfillOfflinePrograms = (data) => {
+    if (!Array.isArray(data.programs) || !data.programs.length) {
+      data.programs = clone(window.VFU_SEED_STATE.programs || [{ id: "prog-ict", name: "Information and Communication Technology", code: "ICT" }, { id: "prog-biz", name: "Business and Financial Management", code: "BIZ" }]);
+    }
+    const byCode = new Map(data.programs.map((program) => [program.code, program]));
+    const legacyToProgramId = { ICT: byCode.get("ICT")?.id || null, Business: byCode.get("BIZ")?.id || null };
+    for (const user of data.users) {
+      if (!user.programId) {
+        const field = legacyFieldFor(user.program);
+        user.programId = field ? legacyToProgramId[field] : null;
+      }
+    }
+    for (const course of data.courses) {
+      if (course.parentCourseId === undefined) course.parentCourseId = null;
+      if (!course.programId) {
+        const field = legacyFieldFor(course.department);
+        course.programId = field ? legacyToProgramId[field] : null;
+      }
+    }
+    return data;
+  };
+
+  const readState = () => backfillOfflinePrograms(JSON.parse(localStorage.getItem(storageKey) || JSON.stringify(clone(window.VFU_SEED_STATE))));
+  const saveState = (data) => localStorage.setItem(storageKey, JSON.stringify(data));
+
   const canAccess = (user, course) => {
-    if (!user || user.role !== "student" || !course) return true;
-    const sf = fieldFor(user.program), cf = fieldFor(course.department);
-    return !sf || !cf || sf === cf;
+    if (!user || user.role !== "student") return true;
+    if (!course) return false;
+    return Boolean(user.programId) && Boolean(course.programId) && user.programId === course.programId;
   };
 
   const handleOffline = (path, method, body) => {
@@ -134,8 +159,66 @@
       return jsonResponse({ room, studyRooms: data.studyRooms });
     }
     if (method === "POST" && path === "/api/courses") {
-      data.courses.push({ id: `course-${Date.now()}`, code: String(body.code || "").toUpperCase(), title: String(body.title || ""), lecturerId: body.lecturerId || "u-lecturer-1", department: body.department || "ICT", progress: 0, color: "#2563eb", schedule: body.schedule || "Not scheduled", nextUp: "Week 1 - Introduction", room: "Virtual", enrolled: 0 });
-      saveState(data); return jsonResponse({ courses: data.courses });
+      const parent = body.parentCourseId ? data.courses.find((item) => item.id === body.parentCourseId) : null;
+      const programId = body.programId || (parent ? parent.programId : null) || null;
+      data.courses.push({ id: `course-${Date.now()}`, code: String(body.code || "").toUpperCase(), title: String(body.title || ""), lecturerId: body.lecturerId || "u-lecturer-1", department: body.department || "ICT", programId, parentCourseId: parent ? parent.id : null, progress: 0, color: "#2563eb", schedule: body.schedule || "Not scheduled", nextUp: "Week 1 - Introduction", room: "Virtual", enrolled: 0 });
+      saveState(data); return jsonResponse({ course: data.courses[data.courses.length - 1], courses: data.courses }, 201);
+    }
+    if (method === "POST" && path === "/api/programs") {
+      const requester = data.users.find((item) => item.id === body.actingUserId);
+      if (!requester || (requester.role !== "lecturer" && requester.role !== "admin")) return jsonResponse({ error: "You do not have permission to perform this action." }, 403);
+      const name = String(body.name || "").trim();
+      const code = String(body.code || "").trim().toUpperCase();
+      if (!name || !code) return jsonResponse({ error: "Program name and code are required." }, 400);
+      if (data.programs.some((program) => program.code.toUpperCase() === code)) return jsonResponse({ error: "A program with that code already exists." }, 409);
+      const program = { id: `prog-${Date.now()}`, name, code };
+      data.programs.push(program); saveState(data);
+      return jsonResponse({ program, programs: data.programs }, 201);
+    }
+    if (method === "POST" && path === "/api/admin/users") {
+      const requester = data.users.find((item) => item.id === body.actingUserId);
+      if (!requester || requester.role !== "admin") return jsonResponse({ error: "You do not have permission to perform this action." }, 403);
+      const email = String(body.email || "").trim().toLowerCase();
+      if (!email || data.users.some((item) => item.email.toLowerCase() === email)) return jsonResponse({ error: "Use a new valid email address." }, 400);
+      const role = ["lecturer", "admin", "student"].includes(String(body.role || "").toLowerCase()) ? String(body.role).toLowerCase() : "student";
+      const user = { id: `u-${role}-${Date.now()}`, name: String(body.name || "New User").trim(), email, role, program: String(body.program || body.department || "VFU").trim(), programId: body.programId || null, studentNumber: body.studentNumber || "", staffNumber: body.staffNumber || "", phone: body.phone || "", avatar: initials(body.name), createdAt: new Date().toISOString() };
+      data.users.push(user); saveState(data);
+      return jsonResponse({ user }, 201);
+    }
+    if (method === "PATCH" && /^\/api\/courses\/[\w-]+$/.test(path)) {
+      const requester = data.users.find((item) => item.id === body.actingUserId);
+      if (!requester || (requester.role !== "lecturer" && requester.role !== "admin")) return jsonResponse({ error: "You do not have permission to perform this action." }, 403);
+      const course = data.courses.find((item) => item.id === path.split("/").pop());
+      if (!course) return jsonResponse({ error: "Course was not found." }, 404);
+      if (requester.role === "lecturer" && course.lecturerId !== requester.id) return jsonResponse({ error: "You can only edit courses assigned to you." }, 403);
+      if (body.programId !== undefined) course.programId = body.programId || null;
+      if (body.parentCourseId !== undefined) course.parentCourseId = body.parentCourseId || null;
+      if (body.lecturerId !== undefined) course.lecturerId = body.lecturerId;
+      for (const field of ["title", "code", "schedule", "room", "nextUp", "department"]) {
+        if (body[field] !== undefined) course[field] = field === "code" ? String(body[field]).toUpperCase() : String(body[field]);
+      }
+      if (body.progress !== undefined) course.progress = Math.max(0, Math.min(100, Number(body.progress) || 0));
+      saveState(data);
+      return jsonResponse({ course, courses: data.courses });
+    }
+    if (method === "PATCH" && path === "/api/profile") {
+      const user = data.users.find((item) => item.id === body.actingUserId);
+      if (!user) return jsonResponse({ error: "User was not found." }, 404);
+      if (body.avatar === undefined) return jsonResponse({ error: "Provide an avatar as initials or a small image (max 300KB)." }, 400);
+      user.avatar = body.avatar;
+      saveState(data);
+      return jsonResponse({ user });
+    }
+    if (method === "PATCH" && /^\/api\/users\/[\w-]+$/.test(path)) {
+      const requester = data.users.find((item) => item.id === body.actingUserId);
+      if (!requester || requester.role !== "admin") return jsonResponse({ error: "You do not have permission to perform this action." }, 403);
+      const user = data.users.find((item) => item.id === path.split("/").pop());
+      if (!user) return jsonResponse({ error: "User was not found." }, 404);
+      for (const field of ["name", "email", "role", "program", "programId", "studentNumber", "staffNumber", "phone", "avatar"]) {
+        if (body[field] !== undefined) user[field] = body[field];
+      }
+      saveState(data);
+      return jsonResponse({ user });
     }
     return jsonResponse({ error: "Offline API route was not found." }, 404);
   };
@@ -176,8 +259,11 @@ const routes = [
   { id: "dashboard", label: "Dashboard", icon: "layout" }, { id: "courses", label: "My Courses", icon: "book" },
   { id: "classroom", label: "Live Room", icon: "video" }, { id: "attendance", label: "Attendance", icon: "check" },
   { id: "assignments", label: "Assignments", icon: "file" }, { id: "discussions", label: "Group Study", icon: "messages" },
-  { id: "analytics", label: "Analytics", icon: "chart" }, { id: "admin", label: "Admin", icon: "settings" }
+  { id: "analytics", label: "Analytics", icon: "chart" }, { id: "programs", label: "Programs & Courses", icon: "book" },
+  { id: "admin", label: "Admin", icon: "settings" }, { id: "profile", label: "Profile", icon: "users" }
 ];
+// Routes absent from this map are visible to every signed-in role.
+const ROUTE_ACCESS = { admin: ["admin"], programs: ["admin", "lecturer"] };
 const roleLabels = { student: "Student", lecturer: "Lecturer", admin: "Admin" };
 const sessionKey = "vfu-session";
 const themeKey = "vfu-theme";
@@ -188,6 +274,8 @@ let localStream = null, screenStream = null;
 const liveRoom = { sessionId: null, mic: true, camera: true, screen: false, hand: false, panel: "chat", messages: [], mediaError: "" };
 const studyState = { roomId: null, messages: [] };
 const openAssignments = new Set();
+const openCourseRows = new Set();
+let editingUserId = null;
 const pendingFiles = {};
 
 /* ============================== dom + icons ============================== */
@@ -226,25 +314,28 @@ const formatDateTime = (value) => value ? new Intl.DateTimeFormat("en", { month:
 const formatDay = (value) => value ? new Intl.DateTimeFormat("en", { day: "numeric", month: "long", year: "numeric" }).format(new Date(value)) : "Not recorded";
 const courseById = (id) => state.courses.find((course) => course.id === id);
 const userById = (id) => state.users.find((user) => user.id === id);
+const programById = (id) => state.programs?.find((program) => program.id === id);
 const currentRole = () => currentUser?.role || authRole;
-const visibleRoutes = () => !currentUser ? [] : currentRole() === "student" ? routes.filter((route) => route.id !== "admin") : routes;
+const visibleRoutes = () => !currentUser ? [] : routes.filter((route) => !ROUTE_ACCESS[route.id] || ROUTE_ACCESS[route.id].includes(currentRole()));
 const matchesQuery = (text) => String(text).toLowerCase().includes(query.trim().toLowerCase());
 const readSession = () => { try { return JSON.parse(localStorage.getItem(sessionKey) || "null"); } catch { return null; } };
 const saveSession = (session) => localStorage.setItem(sessionKey, JSON.stringify(session));
 const clearSession = () => localStorage.removeItem(sessionKey);
 
-function fieldForProgram(value) {
-  const text = String(value || "").toLowerCase();
-  if (/(ict|information|computer|software|network|technolog)/.test(text)) return "ICT";
-  if (/(business|financial|account|management|marketing)/.test(text)) return "Business";
-  return null;
+// Strict program access: a student can only see/join a course when both records
+// carry the same programId. Missing programId on either side denies access
+// (never falls back to "allow everything", unlike the old free-text heuristic).
+function canAccessCourse(user, course) {
+  if (!user || user.role !== "student") return true;
+  if (!course) return false;
+  return Boolean(user.programId) && Boolean(course.programId) && user.programId === course.programId;
 }
 
-function canAccessCourse(user, course) {
-  if (!user || user.role !== "student" || !course) return true;
-  const studentField = fieldForProgram(user.program);
-  const courseField = fieldForProgram(course.department);
-  return !studentField || !courseField || studentField === courseField;
+function renderAvatar(user) {
+  const value = user?.avatar || "VU";
+  return value.startsWith("data:image/")
+    ? `<img class="avatar" src="${value}" alt="">`
+    : `<span class="avatar">${escapeHtml(value)}</span>`;
 }
 
 function myCourses() {
@@ -445,7 +536,7 @@ function renderCourses() {
   const highlight = sessions.find((session) => session.status === "Live") || sessions.filter((session) => session.status === "Scheduled").sort((a, b) => new Date(a.startsAt) - new Date(b.startsAt))[0];
   const highlightCourse = highlight ? courseById(highlight.courseId) : null;
   return `<div class="courses-layout">
-    <section class="panel"><div class="section-head"><h2>My Courses</h2>${currentRole() !== "student" ? `<button class="action primary" type="button" data-route-jump="admin">${icon("plus")} Add course</button>` : `<span class="status-pill">${escapeHtml(fieldForProgram(currentUser.program) || "All fields")}</span>`}</div><div class="grid course-grid">${renderCourseCards(courses, false)}</div></section>
+    <section class="panel"><div class="section-head"><h2>My Courses</h2>${currentRole() !== "student" ? `<button class="action primary" type="button" data-route-jump="programs">${icon("plus")} Add course</button>` : `<span class="status-pill">${escapeHtml(programById(currentUser.programId)?.name || "No program assigned")}</span>`}</div><div class="grid course-grid">${renderCourseCards(courses, false)}</div></section>
     <aside class="panel"><div class="section-head"><h2>Live and upcoming</h2></div>${highlight && highlightCourse ? `<div class="live-next-card"><span class="live-pill ${highlight.status === "Live" ? "on" : ""}">${highlight.status === "Live" ? `<span class="live-dot"></span> Live now` : "Scheduled"}</span><h3>${escapeHtml(highlight.title)}</h3><p>${escapeHtml(highlightCourse.code)} | ${escapeHtml(highlightCourse.title)}</p><p>${formatDateTime(highlight.startsAt)} | ${highlight.duration} min</p>${highlight.status === "Live" ? `<button class="action primary wide" type="button" data-route-jump="classroom">${icon("video")} Open Live Room</button>` : `<p class="mini-note">The Live Room opens when the lecturer starts this class.</p>`}</div>` : `<div class="mini-note">No live or scheduled class for your courses right now. Your lecturer schedules classes here.</div>`}</aside>
   </div>`;
 }
@@ -466,13 +557,13 @@ function renderJoinedRoom(session, course, isStudyRoom, roomMembers) {
   const messages = isStudyRoom ? studyState.messages : liveRoom.messages;
   const primaryTile = liveRoom.screen
     ? `<div class="video-tile primary-tile"><video id="screenVideo" autoplay playsinline muted></video><span class="tile-name">Screen share</span></div>`
-    : `<div class="video-tile primary-tile">${localStream && liveRoom.camera ? `<video id="localVideo" autoplay playsinline muted></video>` : `<div class="tile-placeholder"><span class="avatar">${escapeHtml(currentUser.avatar)}</span><strong>${escapeHtml(currentUser.name)}</strong><small>${liveRoom.mediaError ? "View-only mode" : "Camera is off"}</small></div>`}<span class="tile-name">${escapeHtml(currentUser.name)} (You)${liveRoom.hand ? " ✋" : ""}</span></div>`;
+    : `<div class="video-tile primary-tile">${localStream && liveRoom.camera ? `<video id="localVideo" autoplay playsinline muted></video>` : `<div class="tile-placeholder">${renderAvatar(currentUser)}<strong>${escapeHtml(currentUser.name)}</strong><small>${liveRoom.mediaError ? "View-only mode" : "Camera is off"}</small></div>`}<span class="tile-name">${escapeHtml(currentUser.name)} (You)${liveRoom.hand ? " ✋" : ""}</span></div>`;
   const hiddenLocal = liveRoom.screen && localStream && liveRoom.camera ? `<div class="video-tile"><video id="localVideo" autoplay playsinline muted></video><span class="tile-name">${escapeHtml(currentUser.name)} (You)</span></div>` : "";
 
   return `<section class="live-shell">
     <div class="live-stage">
       <div class="live-topbar"><div><p class="eyebrow">${escapeHtml(course?.code || "VFU")} | ${escapeHtml(course?.title || "Virtual Classroom")}</p><h2>${escapeHtml(isStudyRoom ? session.topic : session.title)}</h2></div><span class="live-pill on"><span class="live-dot"></span> ${isStudyRoom ? "Study room" : "Live"}</span></div>
-      <div class="video-grid">${primaryTile}${hiddenLocal}${others.map((user) => `<div class="video-tile"><div class="tile-placeholder"><span class="avatar">${escapeHtml(user.avatar || initialsOf(user.name))}</span><strong>${escapeHtml(user.name)}</strong><small>${escapeHtml(roleLabels[user.role] || user.role)}</small></div></div>`).join("")}</div>
+      <div class="video-grid">${primaryTile}${hiddenLocal}${others.map((user) => `<div class="video-tile"><div class="tile-placeholder">${renderAvatar(user)}<strong>${escapeHtml(user.name)}</strong><small>${escapeHtml(roleLabels[user.role] || user.role)}</small></div></div>`).join("")}</div>
       ${liveRoom.mediaError ? `<div class="mini-note">${escapeHtml(liveRoom.mediaError)}</div>` : ""}
       <div class="control-bar" aria-label="Live controls">
         <button class="ctrl-button ${liveRoom.mic ? "" : "active"}" type="button" data-live-action="mic">${icon(liveRoom.mic ? "mic" : "micOff")}<span>${liveRoom.mic ? "Mute" : "Unmute"}</span></button>
@@ -490,7 +581,7 @@ function renderJoinedRoom(session, course, isStudyRoom, roomMembers) {
         <button class="panel-tab ${liveRoom.panel === "people" ? "active" : ""}" type="button" data-live-panel="people">${icon("users")} Participants (${participants.length})</button>
       </div>
       ${liveRoom.panel === "people"
-        ? `<div class="live-side-body"><div class="participant-list">${participants.map((user) => `<article><span class="avatar">${escapeHtml(user.avatar || initialsOf(user.name))}</span><div><strong>${escapeHtml(user.name)}${user.id === currentUser.id ? " (You)" : ""}</strong><p>${escapeHtml(roleLabels[user.role] || user.role)}</p></div><span class="presence"></span></article>`).join("")}</div><p class="mini-note">Media runs on WebRTC device capture in your browser.</p></div>`
+        ? `<div class="live-side-body"><div class="participant-list">${participants.map((user) => `<article>${renderAvatar(user)}<div><strong>${escapeHtml(user.name)}${user.id === currentUser.id ? " (You)" : ""}</strong><p>${escapeHtml(roleLabels[user.role] || user.role)}</p></div><span class="presence"></span></article>`).join("")}</div><p class="mini-note">Media runs on WebRTC device capture in your browser.</p></div>`
         : `<div class="live-side-body"><div class="chat-stream">${messages.length ? messages.map((message) => `<article class="chat-message"><strong>${escapeHtml(message.author)}</strong><p>${escapeHtml(message.text)}</p></article>`).join("") : `<p class="mini-note">No messages yet. Say hello to the room.</p>`}</div><form class="compose inline" id="chatForm"><input name="message" placeholder="Message the room" autocomplete="off"><button class="action primary" type="submit" title="Send message">${icon("send")}</button></form></div>`}
     </aside>
   </section>`;
@@ -640,11 +731,85 @@ function renderAnalytics() {
 
 /* ============================== admin ============================== */
 
+function renderUserRow(user) {
+  const isEditing = editingUserId === user.id;
+  const row = `<tr><td>${escapeHtml(user.name)}</td><td>${escapeHtml(roleLabels[user.role] || user.role)}</td><td>${escapeHtml(programById(user.programId)?.name || user.program || "VFU")}</td><td>${formatDay(user.createdAt)}</td><td><button class="action" type="button" data-toggle-user-edit="${escapeHtml(user.id)}">${isEditing ? "Close" : "Edit"}</button></td></tr>`;
+  if (!isEditing) return row;
+  return `${row}<tr class="edit-row"><td colspan="5"><form class="form-grid cols-2" data-edit-user="${escapeHtml(user.id)}">
+    <label>Full name<input name="name" value="${escapeHtml(user.name)}" required></label>
+    <label>Email<input name="email" type="email" value="${escapeHtml(user.email)}" required></label>
+    <label>Role<select name="role"><option value="student" ${user.role === "student" ? "selected" : ""}>Student</option><option value="lecturer" ${user.role === "lecturer" ? "selected" : ""}>Lecturer</option><option value="admin" ${user.role === "admin" ? "selected" : ""}>Admin</option></select></label>
+    <label>Program<select name="programId"><option value="">No program</option>${(state.programs || []).map((program) => `<option value="${escapeHtml(program.id)}" ${user.programId === program.id ? "selected" : ""}>${escapeHtml(program.name)}</option>`).join("")}</select></label>
+    <label>New password (optional)<input name="password" type="password" minlength="6" placeholder="Leave blank to keep current"></label>
+    <button class="action primary" type="submit" style="grid-column: 1 / -1;">${icon("check")} Save changes</button>
+  </form></td></tr>`;
+}
+
 function renderAdmin() {
-  if (currentRole() === "student") return emptyState("Admins only", "This area is for lecturers and administrators.");
-  return `<section class="mini-metrics">${metricCard("Users", state.users.length, "Registered accounts", "users")}${metricCard("Courses", state.courses.length, "Across departments", "book")}${metricCard("Live now", state.classSessions.filter((session) => session.status === "Live").length, "Running classes", "video")}</section>
-  <section class="panel"><div class="section-head"><h2>Create course</h2></div><form class="form-grid cols-2" id="courseForm"><label>Course code<input name="code" placeholder="ICT 351" required></label><label>Course title<input name="title" placeholder="Web Application Development" required></label><label>Department<select name="department"><option value="ICT">ICT</option><option value="Business and Financial Management">Business and Financial Management</option></select></label><label>Schedule<input name="schedule" placeholder="Mon and Wed, 09:00"></label><button class="action primary" type="submit" style="grid-column: 1 / -1;">${icon("plus")} Save course</button></form></section>
-  <section class="panel"><div class="section-head"><h2>Users</h2></div><div class="table-scroll"><table class="data-table"><thead><tr><th>Name</th><th>Role</th><th>Program</th><th>Registered</th></tr></thead><tbody>${state.users.map((user) => `<tr><td>${escapeHtml(user.name)}</td><td>${escapeHtml(roleLabels[user.role] || user.role)}</td><td>${escapeHtml(user.program || "VFU")}</td><td>${formatDay(user.createdAt)}</td></tr>`).join("")}</tbody></table></div></section>`;
+  if (currentRole() !== "admin") return emptyState("Admins only", "This area is for administrators.");
+  return `<section class="mini-metrics">${metricCard("Users", state.users.length, "Registered accounts", "users")}${metricCard("Courses", state.courses.length, "Across programs", "book")}${metricCard("Live now", state.classSessions.filter((session) => session.status === "Live").length, "Running classes", "video")}</section>
+  <section class="panel"><div class="section-head"><h2>Create lecturer or admin account</h2><span class="status-pill">Admin only</span></div><form class="form-grid cols-2" id="staffUserForm"><label>Full name<input name="name" required placeholder="Full name"></label><label>Email<input name="email" type="email" required placeholder="name@vfu.edu"></label><label>Role<select name="role"><option value="lecturer">Lecturer</option><option value="admin">Admin</option></select></label><label>Program<select name="programId"><option value="">No program</option>${(state.programs || []).map((program) => `<option value="${escapeHtml(program.id)}">${escapeHtml(program.name)}</option>`).join("")}</select></label><label>Staff number<input name="staffNumber" placeholder="VFU-LEC-2026-002"></label><label>Temporary password<input name="password" type="password" required minlength="6" placeholder="At least 6 characters"></label><button class="action primary" type="submit" style="grid-column: 1 / -1;">${icon("plus")} Create account</button></form><p class="mini-note">This is the only way to create a lecturer or admin account. Students self-register on the sign-up screen.</p></section>
+  <section class="panel"><div class="section-head"><h2>Users</h2></div><div class="table-scroll"><table class="data-table"><thead><tr><th>Name</th><th>Role</th><th>Program</th><th>Registered</th><th></th></tr></thead><tbody>${state.users.map((user) => renderUserRow(user)).join("")}</tbody></table></div></section>`;
+}
+
+/* ============================== programs & courses ============================== */
+
+function renderCourseEditForm(course, lecturers) {
+  return `<form class="form-grid cols-2" data-edit-course="${escapeHtml(course.id)}">
+    <label>Title<input name="title" value="${escapeHtml(course.title)}" required></label>
+    <label>Code<input name="code" value="${escapeHtml(course.code)}" required></label>
+    <label>Program<select name="programId"><option value="">No program</option>${(state.programs || []).map((program) => `<option value="${escapeHtml(program.id)}" ${course.programId === program.id ? "selected" : ""}>${escapeHtml(program.name)}</option>`).join("")}</select></label>
+    <label>Schedule<input name="schedule" value="${escapeHtml(course.schedule || "")}"></label>
+    <label>Room<input name="room" value="${escapeHtml(course.room || "")}"></label>
+    <label>Progress %<input name="progress" type="number" min="0" max="100" value="${course.progress || 0}"></label>
+    ${currentRole() === "admin" ? `<label>Reassign to<select name="lecturerId">${lecturers.map((user) => `<option value="${escapeHtml(user.id)}" ${course.lecturerId === user.id ? "selected" : ""}>${escapeHtml(user.name)} (${escapeHtml(roleLabels[user.role] || user.role)})</option>`).join("")}</select></label>` : ""}
+    <button class="action primary" type="submit" style="grid-column: 1 / -1;">${icon("check")} Save changes</button>
+  </form>`;
+}
+
+function renderCourseRow(course, subCoursesOf, lecturers, depth) {
+  const canEdit = currentRole() === "admin" || course.lecturerId === currentUser.id;
+  const isOpen = openCourseRows.has(course.id);
+  const lecturer = userById(course.lecturerId);
+  const detail = isOpen ? `<div class="assignment-detail">
+    <p class="eyebrow">${escapeHtml(programById(course.programId)?.name || "No program")} | Lecturer: ${escapeHtml(lecturer?.name || "Unassigned")} | ${escapeHtml(course.schedule || "Not scheduled")}</p>
+    ${canEdit ? renderCourseEditForm(course, lecturers) : `<p class="mini-note">Only the assigned lecturer or an admin can edit this course.</p>`}
+  </div>` : "";
+  const header = `<article class="assignment-row"${depth ? ` style="margin-left:${depth * 20}px;"` : ""}><button class="assignment-head" type="button" data-toggle-course="${escapeHtml(course.id)}"><div><h3>${escapeHtml(course.code)} | ${escapeHtml(course.title)}</h3><p>${escapeHtml(programById(course.programId)?.name || "No program")} | ${escapeHtml(lecturer?.name || "Unassigned")}</p></div><span class="status-pill">${course.progress || 0}%</span></button>${detail}</article>`;
+  return header + subCoursesOf(course.id).map((sub) => renderCourseRow(sub, subCoursesOf, lecturers, (depth || 0) + 1)).join("");
+}
+
+function renderPrograms() {
+  if (currentRole() === "student") return emptyState("Lecturers and admins only", "This area is for program and course management.");
+  const topLevel = state.courses.filter((course) => !course.parentCourseId);
+  const subCoursesOf = (id) => state.courses.filter((course) => course.parentCourseId === id);
+  const lecturers = state.users.filter((user) => user.role === "lecturer" || user.role === "admin");
+
+  return `<section class="panel"><div class="section-head"><h2>Create program</h2></div><form class="form-grid cols-2" id="programForm"><label>Program name<input name="name" required placeholder="Information and Communication Technology"></label><label>Program code<input name="code" required placeholder="ICT"></label><button class="action primary" type="submit" style="grid-column: 1 / -1;">${icon("plus")} Save program</button></form></section>
+  <section class="panel"><div class="section-head"><h2>Create course or sub-course</h2></div><form class="form-grid cols-2" id="courseForm"><label>Course code<input name="code" placeholder="ICT 351" required></label><label>Course title<input name="title" placeholder="Web Application Development" required></label><label>Program<select name="programId"><option value="">Inherit from parent / none</option>${(state.programs || []).map((program) => `<option value="${escapeHtml(program.id)}">${escapeHtml(program.name)}</option>`).join("")}</select></label><label>Parent course (optional)<select name="parentCourseId"><option value="">None (top-level course)</option>${topLevel.map((course) => `<option value="${escapeHtml(course.id)}">${escapeHtml(course.code)} | ${escapeHtml(course.title)}</option>`).join("")}</select></label><label>Schedule<input name="schedule" placeholder="Mon and Wed, 09:00"></label>${currentRole() === "admin" ? `<label>Lecturer<select name="lecturerId">${lecturers.map((user) => `<option value="${escapeHtml(user.id)}">${escapeHtml(user.name)}</option>`).join("")}</select></label>` : ""}<button class="action primary" type="submit" style="grid-column: 1 / -1;">${icon("plus")} Save course</button></form></section>
+  <section class="panel"><div class="section-head"><h2>Courses</h2></div><div class="assignment-list">${topLevel.length ? topLevel.map((course) => renderCourseRow(course, subCoursesOf, lecturers, 0)).join("") : emptyState("No courses yet", "Create your first course above.")}</div></section>`;
+}
+
+/* ============================== profile ============================== */
+
+function renderProfile() {
+  return `<section class="panel">
+    <div class="section-head"><h2>My profile</h2></div>
+    <div class="profile-summary">${renderAvatar(currentUser)}<div><h3>${escapeHtml(currentUser.name)}</h3><p>${escapeHtml(roleLabels[currentUser.role] || currentUser.role)}</p></div></div>
+    <div class="table-scroll"><table class="data-table"><tbody>
+      <tr><td>Email</td><td>${escapeHtml(currentUser.email)}</td></tr>
+      <tr><td>Program</td><td>${escapeHtml(programById(currentUser.programId)?.name || currentUser.program || "Not set")}</td></tr>
+      ${currentUser.studentNumber ? `<tr><td>Student number</td><td>${escapeHtml(currentUser.studentNumber)}</td></tr>` : ""}
+      ${currentUser.staffNumber ? `<tr><td>Staff number</td><td>${escapeHtml(currentUser.staffNumber)}</td></tr>` : ""}
+      <tr><td>Phone</td><td>${escapeHtml(currentUser.phone || "Not set")}</td></tr>
+      <tr><td>Registered</td><td>${formatDay(currentUser.createdAt)}</td></tr>
+    </tbody></table></div>
+    <p class="mini-note">You can update your profile picture below. All other details are managed by an administrator.</p>
+    <form class="form-grid" id="avatarForm">
+      <label>Profile picture<input type="file" name="avatar" accept="image/*" id="avatarInput"></label>
+      <button class="action primary" type="submit">${icon("upload")} Save picture</button>
+    </form>
+  </section>`;
 }
 
 /* ============================== shell + render ============================== */
@@ -656,10 +821,10 @@ function renderShell() {
   if (sessionPanel) {
     sessionPanel.innerHTML = !currentUser
       ? `<p class="session-hint">Sign in or create a student account.</p>`
-      : `<div class="session-card-mini"><span class="avatar">${escapeHtml(currentUser.avatar)}</span><div><strong>${escapeHtml(currentUser.name)}</strong><small>${escapeHtml(roleLabels[currentUser.role] || currentUser.role)} | ${escapeHtml(currentUser.program || "VFU")}</small></div></div><button class="session-logout" type="button" data-logout>${icon("logout")} Log Out</button>`;
+      : `<div class="session-card-mini">${renderAvatar(currentUser)}<div><strong>${escapeHtml(currentUser.name)}</strong><small>${escapeHtml(roleLabels[currentUser.role] || currentUser.role)} | ${escapeHtml(currentUser.program || "VFU")}</small></div></div><button class="session-logout" type="button" data-logout>${icon("logout")} Log Out</button>`;
   }
   if (profileCard) {
-    profileCard.innerHTML = currentUser ? `<span class="avatar">${escapeHtml(currentUser.avatar)}</span><span><strong>${escapeHtml(currentUser.name)}</strong><small>${escapeHtml(currentUser.role)}</small></span>` : "";
+    profileCard.innerHTML = currentUser ? `<button class="profile-card-button" type="button" data-route="profile">${renderAvatar(currentUser)}<span><strong>${escapeHtml(currentUser.name)}</strong><small>${escapeHtml(currentUser.role)}</small></span></button>` : "";
   }
   const unread = state?.notifications?.filter((item) => !item.read).length || 0;
   notificationCount.textContent = unread;
@@ -676,7 +841,7 @@ function render() {
   const viewMap = {
     dashboard: renderDashboard, courses: renderCourses, classroom: renderClassroom,
     attendance: renderAttendance, assignments: renderAssignments, discussions: renderDiscussions,
-    analytics: renderAnalytics, admin: renderAdmin
+    analytics: renderAnalytics, admin: renderAdmin, programs: renderPrograms, profile: renderProfile
   };
   viewRoot.innerHTML = (viewMap[currentRoute] || viewMap.dashboard)();
   afterRender();
@@ -803,6 +968,22 @@ function handleFileSelected(input) {
   reader.readAsDataURL(file);
 }
 
+let pendingAvatar = null;
+
+function handleAvatarFileSelected(input) {
+  const file = input.files?.[0];
+  if (!file) { pendingAvatar = null; return; }
+  if (file.size > 300 * 1024) {
+    input.value = "";
+    pendingAvatar = null;
+    showToast("Image is too large. Keep it under 300 KB.", "warning");
+    return;
+  }
+  const reader = new FileReader();
+  reader.onload = () => { pendingAvatar = String(reader.result || ""); };
+  reader.readAsDataURL(file);
+}
+
 async function handleDiscussionReply(discussionId) {
   const text = window.prompt("Write a reply to the discussion:", "");
   if (text === null || !text.trim()) return;
@@ -884,6 +1065,17 @@ function handleViewInteraction(event) {
     else openAssignments.add(data.openAssignment);
     render();
   }
+
+  if (data.toggleCourse) {
+    if (openCourseRows.has(data.toggleCourse)) openCourseRows.delete(data.toggleCourse);
+    else openCourseRows.add(data.toggleCourse);
+    render();
+  }
+
+  if (data.toggleUserEdit) {
+    editingUserId = editingUserId === data.toggleUserEdit ? null : data.toggleUserEdit;
+    render();
+  }
 }
 
 function registerAppEvents() {
@@ -896,10 +1088,72 @@ function registerAppEvents() {
 
     if (form.id === "courseForm") {
       event.preventDefault();
+      const payload = Object.fromEntries(new FormData(form).entries());
+      if (currentRole() === "lecturer") payload.lecturerId = currentUser.id;
       try {
-        await api("/api/courses", { method: "POST", body: { ...Object.fromEntries(new FormData(form).entries()), lecturerId: currentRole() === "lecturer" ? currentUser.id : undefined } });
+        await api("/api/courses", { method: "POST", body: { ...payload, actingUserId: currentUser.id } });
         await loadState();
         showToast("Course created.");
+      } catch (error) { showToast(error.message, "error"); }
+      return;
+    }
+
+    if (form.id === "programForm") {
+      event.preventDefault();
+      try {
+        await api("/api/programs", { method: "POST", body: { ...Object.fromEntries(new FormData(form).entries()), actingUserId: currentUser.id } });
+        await loadState();
+        showToast("Program created.");
+      } catch (error) { showToast(error.message, "error"); }
+      return;
+    }
+
+    if (form.id === "staffUserForm") {
+      event.preventDefault();
+      try {
+        await api("/api/admin/users", { method: "POST", body: { ...Object.fromEntries(new FormData(form).entries()), actingUserId: currentUser.id } });
+        form.reset();
+        await loadState();
+        showToast("Account created.");
+      } catch (error) { showToast(error.message, "error"); }
+      return;
+    }
+
+    if (form.dataset.editCourse) {
+      event.preventDefault();
+      const courseId = form.dataset.editCourse;
+      try {
+        await api(`/api/courses/${courseId}`, { method: "PATCH", body: { ...Object.fromEntries(new FormData(form).entries()), actingUserId: currentUser.id } });
+        await loadState();
+        showToast("Course updated.");
+      } catch (error) { showToast(error.message, "error"); }
+      return;
+    }
+
+    if (form.dataset.editUser) {
+      event.preventDefault();
+      const userId = form.dataset.editUser;
+      const payload = Object.fromEntries(new FormData(form).entries());
+      if (!payload.password) delete payload.password;
+      try {
+        await api(`/api/users/${userId}`, { method: "PATCH", body: { ...payload, actingUserId: currentUser.id } });
+        editingUserId = null;
+        await loadState();
+        showToast("User updated.");
+      } catch (error) { showToast(error.message, "error"); }
+      return;
+    }
+
+    if (form.id === "avatarForm") {
+      event.preventDefault();
+      if (!pendingAvatar) { showToast("Choose an image first.", "warning"); return; }
+      try {
+        const response = await api("/api/profile", { method: "PATCH", body: { avatar: pendingAvatar, actingUserId: currentUser.id } });
+        currentUser = response.user;
+        pendingAvatar = null;
+        form.reset();
+        await loadState();
+        showToast("Profile picture updated.");
       } catch (error) { showToast(error.message, "error"); }
       return;
     }
@@ -965,6 +1219,7 @@ function registerAppEvents() {
 
   document.addEventListener("change", (event) => {
     if (event.target.matches("input[type='file'][data-file-for]")) handleFileSelected(event.target);
+    if (event.target.id === "avatarInput") handleAvatarFileSelected(event.target);
   });
 
   notificationButton?.addEventListener("click", () => {

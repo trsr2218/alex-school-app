@@ -349,6 +349,21 @@ h1 { margin: 0; color: var(--ink); font-size: 26px; line-height: 1.1; }
   color: var(--accent);
   font-size: 12px;
   font-weight: 900;
+  object-fit: cover;
+}
+
+.profile-card-button {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  border: none;
+  background: none;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
 }
 
 .profile strong, .profile small {
@@ -789,6 +804,12 @@ html[data-theme="light"] .live-stage { background: #101725; }
 }
 .data-table td { padding: 10px; border-bottom: 1px solid var(--line-soft); color: var(--text); }
 .data-table tr:last-child td { border-bottom: 0; }
+.data-table tr.edit-row td { background: var(--panel-2); padding: 14px; }
+
+.profile-summary { display: flex; align-items: center; gap: 16px; margin-bottom: 16px; }
+.profile-summary .avatar { width: 64px; height: 64px; font-size: 22px; border-radius: 14px; }
+.profile-summary h3 { margin: 0; font-size: 18px; }
+.profile-summary p { margin: 2px 0 0; color: var(--muted); font-size: 13px; text-transform: capitalize; }
 
 .mini-metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
 

@@ -4,6 +4,10 @@ window.VFU_SEED_STATE = {
     "tagline": "Interactive learning, attendance, collaboration, and academic monitoring.",
     "term": "June 2026 Semester"
   },
+  "programs": [
+    { "id": "prog-ict", "name": "Information and Communication Technology", "code": "ICT" },
+    { "id": "prog-biz", "name": "Business and Financial Management", "code": "BIZ" }
+  ],
   "users": [
     {
       "id": "u-student-1",
@@ -11,6 +15,7 @@ window.VFU_SEED_STATE = {
       "email": "student@vfu.local",
       "role": "student",
       "program": "BSc Information and Communication Technology",
+      "programId": "prog-ict",
       "studentNumber": "VFU-ST-2026-001",
       "avatar": "AL",
       "createdAt": "2026-01-12T08:00:00.000Z",
@@ -22,6 +27,7 @@ window.VFU_SEED_STATE = {
       "email": "bwalya@vfu.local",
       "role": "student",
       "program": "BSc Business and Financial Management",
+      "programId": "prog-biz",
       "studentNumber": "VFU-ST-2026-002",
       "avatar": "BM",
       "createdAt": "2026-01-15T08:00:00.000Z",
@@ -33,6 +39,7 @@ window.VFU_SEED_STATE = {
       "email": "lecturer@vfu.local",
       "role": "lecturer",
       "program": "School of ICT",
+      "programId": "prog-ict",
       "avatar": "NB",
       "createdAt": "2025-09-01T08:00:00.000Z"
     },
@@ -42,6 +49,7 @@ window.VFU_SEED_STATE = {
       "email": "admin@vfu.local",
       "role": "admin",
       "program": "Academic Registry",
+      "programId": null,
       "avatar": "SA",
       "createdAt": "2025-09-01T08:00:00.000Z"
     }
@@ -53,6 +61,8 @@ window.VFU_SEED_STATE = {
       "title": "Web Application Development",
       "lecturerId": "u-lecturer-1",
       "department": "ICT",
+      "programId": "prog-ict",
+      "parentCourseId": null,
       "progress": 72,
       "color": "#2563eb",
       "schedule": "Mon and Wed, 09:00",
@@ -66,6 +76,8 @@ window.VFU_SEED_STATE = {
       "title": "Database Systems",
       "lecturerId": "u-lecturer-1",
       "department": "ICT",
+      "programId": "prog-ict",
+      "parentCourseId": null,
       "progress": 58,
       "color": "#059669",
       "schedule": "Tue, 11:00",
@@ -79,6 +91,8 @@ window.VFU_SEED_STATE = {
       "title": "Computer Networks",
       "lecturerId": "u-lecturer-1",
       "department": "ICT",
+      "programId": "prog-ict",
+      "parentCourseId": null,
       "progress": 64,
       "color": "#d97706",
       "schedule": "Thu, 14:00",
@@ -92,6 +106,8 @@ window.VFU_SEED_STATE = {
       "title": "Financial Accounting",
       "lecturerId": "u-lecturer-1",
       "department": "Business and Financial Management",
+      "programId": "prog-biz",
+      "parentCourseId": null,
       "progress": 47,
       "color": "#7c3aed",
       "schedule": "Fri, 10:00",
