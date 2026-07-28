@@ -48,6 +48,9 @@
   const handleOffline = (path, method, body) => {
     const data = readState();
     if (!Array.isArray(data.studyRooms)) data.studyRooms = [];
+    if (!Array.isArray(data.announcements)) data.announcements = [];
+    if (!Array.isArray(data.tutorials)) data.tutorials = [];
+    if (!Array.isArray(data.materials)) data.materials = [];
     const actor = data.users.find((item) => item.id === body.userId) || null;
 
     if (method === "GET" && path === "/api/state") return jsonResponse(data);
@@ -86,12 +89,34 @@
       if (session.status !== "Live") return jsonResponse({ error: "This class is not live right now." }, 409);
       const course = data.courses.find((item) => item.id === session.courseId);
       if (!canAccess(actor, course)) return jsonResponse({ error: "This class is only open to students enrolled in its field." }, 403);
+      if (actor && actor.role === "student" && actor.studentNumber && String(body.studentNumber || "").trim() !== actor.studentNumber) {
+        return jsonResponse({ error: "The student number you entered does not match our records." }, 403);
+      }
       if (actor && actor.role === "student" && !data.attendance.some((item) => item.sessionId === session.id && item.userId === actor.id)) {
         data.attendance.push({ id: `att-${Date.now()}`, sessionId: session.id, courseId: session.courseId, userId: actor.id, status: "Present", joinedAt: new Date().toISOString() });
         session.participants = Number(session.participants || 0) + 1;
         saveState(data);
       }
       return jsonResponse({ session, attendance: data.attendance, message: "Joined the live class." });
+    }
+    if (method === "POST" && path === "/api/sessions/schedule") {
+      const course = data.courses.find((item) => item.id === body.courseId);
+      if (!course) return jsonResponse({ error: "Course was not found." }, 404);
+      const startsAt = new Date(body.startsAt || "");
+      if (Number.isNaN(startsAt.getTime()) || startsAt.getTime() <= Date.now()) return jsonResponse({ error: "Scheduled time must be a valid date in the future." }, 400);
+      const duration = Number(body.duration);
+      const session = { id: `session-${Date.now()}`, courseId: course.id, title: String(body.title || "").trim() || `${course.title} live class`, startsAt: startsAt.toISOString(), duration: duration > 0 ? Math.min(duration, 480) : 60, status: "Scheduled", participants: 0, hostId: body.userId || "u-lecturer-1" };
+      data.classSessions.push(session); saveState(data);
+      return jsonResponse({ session, classSessions: data.classSessions }, 201);
+    }
+    if (method === "POST" && path === "/api/sessions/begin") {
+      const session = data.classSessions.find((item) => item.id === body.sessionId);
+      if (!session) return jsonResponse({ error: "Class session was not found." }, 404);
+      if (session.status !== "Scheduled") return jsonResponse({ error: "This session is not in a scheduled state." }, 409);
+      if (data.classSessions.some((item) => item.courseId === session.courseId && item.status === "Live")) return jsonResponse({ error: "A live class is already running for this course." }, 409);
+      session.status = "Live"; session.startsAt = new Date().toISOString(); session.hostId = body.userId || session.hostId;
+      saveState(data);
+      return jsonResponse({ session, classSessions: data.classSessions });
     }
     if (method === "POST" && path === "/api/sessions/end") {
       const session = data.classSessions.find((item) => item.id === body.sessionId);
@@ -149,6 +174,9 @@
       if (!room || room.status !== "Open") return jsonResponse({ error: "Study room is not open." }, 404);
       const course = data.courses.find((item) => item.id === room.courseId);
       if (!canAccess(actor, course)) return jsonResponse({ error: "This room is private to students of its course field." }, 403);
+      if (actor && actor.role === "student" && actor.studentNumber && String(body.studentNumber || "").trim() !== actor.studentNumber) {
+        return jsonResponse({ error: "The student number you entered does not match our records." }, 403);
+      }
       if (actor && !room.members.includes(actor.id)) { room.members.push(actor.id); saveState(data); }
       return jsonResponse({ room, studyRooms: data.studyRooms });
     }
@@ -174,6 +202,61 @@
       const program = { id: `prog-${Date.now()}`, name, code };
       data.programs.push(program); saveState(data);
       return jsonResponse({ program, programs: data.programs }, 201);
+    }
+    if (method === "POST" && path === "/api/announcements") {
+      const requester = data.users.find((item) => item.id === body.actingUserId);
+      if (!requester || (requester.role !== "lecturer" && requester.role !== "admin")) return jsonResponse({ error: "You do not have permission to perform this action." }, 403);
+      const title = String(body.title || "").trim();
+      const eventAt = new Date(body.eventAt || "");
+      if (!title) return jsonResponse({ error: "Title is required." }, 400);
+      if (Number.isNaN(eventAt.getTime())) return jsonResponse({ error: "A valid event date/time is required." }, 400);
+      const audienceType = ["all", "program", "course"].includes(String(body.audienceType)) ? body.audienceType : "all";
+      let programId = null, courseId = null;
+      if (audienceType === "program") {
+        programId = String(body.programId || "");
+        if (!programId || !data.programs.some((program) => program.id === programId)) return jsonResponse({ error: "Program was not found." }, 400);
+      } else if (audienceType === "course") {
+        courseId = String(body.courseId || "");
+        if (!courseId || !data.courses.some((course) => course.id === courseId)) return jsonResponse({ error: "Course was not found." }, 400);
+      }
+      const announcement = { id: `announce-${Date.now()}`, type: String(body.type || "announcement"), title, body: String(body.body || "").trim(), eventAt: eventAt.toISOString(), audienceType, programId, courseId, authorId: requester.id, createdAt: new Date().toISOString() };
+      data.announcements.push(announcement); saveState(data);
+      return jsonResponse({ announcement, announcements: data.announcements }, 201);
+    }
+    if (method === "POST" && path === "/api/tutorials") {
+      const requester = data.users.find((item) => item.id === body.actingUserId);
+      if (!requester || (requester.role !== "lecturer" && requester.role !== "admin")) return jsonResponse({ error: "You do not have permission to perform this action." }, 403);
+      const title = String(body.title || "").trim();
+      const videoUrl = String(body.videoUrl || "").trim();
+      const programId = String(body.programId || "");
+      if (!title || !videoUrl) return jsonResponse({ error: "Title and a video URL are required." }, 400);
+      if (!/^https?:\/\//i.test(videoUrl)) return jsonResponse({ error: "Video URL must start with http:// or https://." }, 400);
+      if (!programId || !data.programs.some((program) => program.id === programId)) return jsonResponse({ error: "A valid program is required." }, 400);
+      const tutorial = { id: `tutorial-${Date.now()}`, title, description: String(body.description || "").trim(), videoUrl, programId, authorId: requester.id, createdAt: new Date().toISOString() };
+      data.tutorials.push(tutorial); saveState(data);
+      return jsonResponse({ tutorial, tutorials: data.tutorials }, 201);
+    }
+    if (method === "POST" && path === "/api/materials") {
+      const requester = data.users.find((item) => item.id === body.actingUserId);
+      if (!requester || (requester.role !== "lecturer" && requester.role !== "admin")) return jsonResponse({ error: "You do not have permission to perform this action." }, 403);
+      const title = String(body.title || "").trim();
+      const courseId = body.courseId ? String(body.courseId) : null;
+      const programId = body.programId ? String(body.programId) : null;
+      const fileName = String(body.fileName || "").trim();
+      const fileData = typeof body.fileData === "string" && body.fileData.startsWith("data:") ? body.fileData : "";
+      if (!title) return jsonResponse({ error: "Title is required." }, 400);
+      if (!fileName || !fileData) return jsonResponse({ error: "A file (under ~600KB) is required." }, 400);
+      if (Boolean(courseId) === Boolean(programId)) return jsonResponse({ error: "Choose exactly one of course or program for this material." }, 400);
+      let course = null;
+      if (courseId) {
+        course = data.courses.find((item) => item.id === courseId);
+        if (!course) return jsonResponse({ error: "Course was not found." }, 400);
+        if (requester.role === "lecturer" && course.lecturerId !== requester.id) return jsonResponse({ error: "You can only upload materials for courses assigned to you." }, 403);
+      }
+      if (programId && !data.programs.some((program) => program.id === programId)) return jsonResponse({ error: "Program was not found." }, 400);
+      const material = { id: `material-${Date.now()}`, title, description: String(body.description || "").trim(), courseId, programId, fileName, fileType: String(body.fileType || ""), fileSize: Number(body.fileSize) || 0, fileData, authorId: requester.id, createdAt: new Date().toISOString() };
+      data.materials.push(material); saveState(data);
+      return jsonResponse({ material, materials: data.materials }, 201);
     }
     if (method === "POST" && path === "/api/admin/users") {
       const requester = data.users.find((item) => item.id === body.actingUserId);
@@ -259,8 +342,10 @@ const routes = [
   { id: "dashboard", label: "Dashboard", icon: "layout" }, { id: "courses", label: "My Courses", icon: "book" },
   { id: "classroom", label: "Live Room", icon: "video" }, { id: "attendance", label: "Attendance", icon: "check" },
   { id: "assignments", label: "Assignments", icon: "file" }, { id: "discussions", label: "Group Study", icon: "messages" },
-  { id: "analytics", label: "Analytics", icon: "chart" }, { id: "programs", label: "Programs & Courses", icon: "book" },
-  { id: "admin", label: "Admin", icon: "settings" }, { id: "profile", label: "Profile", icon: "users" }
+  { id: "announcements", label: "Calendar", icon: "calendar" }, { id: "tutorials", label: "Tutorials", icon: "video" },
+  { id: "library", label: "Library", icon: "folder" }, { id: "analytics", label: "Analytics", icon: "chart" },
+  { id: "programs", label: "Programs & Courses", icon: "book" }, { id: "admin", label: "Admin", icon: "settings" },
+  { id: "profile", label: "Profile", icon: "users" }
 ];
 // Routes absent from this map are visible to every signed-in role.
 const ROUTE_ACCESS = { admin: ["admin"], programs: ["admin", "lecturer"] };
@@ -268,19 +353,22 @@ const roleLabels = { student: "Student", lecturer: "Lecturer", admin: "Admin" };
 const sessionKey = "vfu-session";
 const themeKey = "vfu-theme";
 const usageKey = "vfu-usage";
+const sidebarKey = "vfu-sidebar";
 
 let state = null, currentRoute = "dashboard", currentUser = null, query = "", authMode = "login", authRole = "student";
 let localStream = null, screenStream = null;
-const liveRoom = { sessionId: null, mic: true, camera: true, screen: false, hand: false, panel: "chat", messages: [], mediaError: "" };
+let sidebarCollapsed = localStorage.getItem(sidebarKey) === "collapsed";
+const liveRoom = { sessionId: null, mic: true, camera: true, screen: false, hand: false, panel: "chat", messages: [], mediaError: "", sideHidden: false };
 const studyState = { roomId: null, messages: [] };
 const openAssignments = new Set();
 const openCourseRows = new Set();
 let editingUserId = null;
 const pendingFiles = {};
+let pendingMaterialFile = null;
 
 /* ============================== dom + icons ============================== */
 
-const viewRoot = document.querySelector("#viewRoot"), navList = document.querySelector("#navList"), sessionPanel = document.querySelector("#sessionPanel"), profileCard = document.querySelector("#profileCard"), pageTitle = document.querySelector("#pageTitle"), termLabel = document.querySelector("#termLabel"), notificationCount = document.querySelector("#notificationCount"), notificationButton = document.querySelector("#notificationButton"), noticeStack = document.querySelector("#noticeStack"), themeSwitch = document.querySelector("#themeSwitch");
+const viewRoot = document.querySelector("#viewRoot"), navList = document.querySelector("#navList"), sessionPanel = document.querySelector("#sessionPanel"), profileCard = document.querySelector("#profileCard"), pageTitle = document.querySelector("#pageTitle"), termLabel = document.querySelector("#termLabel"), notificationCount = document.querySelector("#notificationCount"), notificationButton = document.querySelector("#notificationButton"), noticeStack = document.querySelector("#noticeStack"), themeSwitch = document.querySelector("#themeSwitch"), appShell = document.querySelector("#appShell"), sidebarToggleSlot = document.querySelector("#sidebarToggleSlot");
 
 const iconPaths = {
   layout: "<rect x='3' y='3' width='7' height='7'></rect><rect x='14' y='3' width='7' height='7'></rect><rect x='14' y='14' width='7' height='7'></rect><rect x='3' y='14' width='7' height='7'></rect>",
@@ -303,7 +391,10 @@ const iconPaths = {
   users: "<path d='M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2'></path><circle cx='9' cy='7' r='4'></circle><path d='M23 21v-2a4 4 0 0 0-3-3.87'></path><path d='M16 3.13a4 4 0 0 1 0 7.75'></path>",
   logout: "<path d='M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4'></path><path d='M16 17l5-5-5-5'></path><path d='M21 12H9'></path>",
   clock: "<circle cx='12' cy='12' r='10'></circle><path d='M12 6v6l4 2'></path>",
-  wallet: "<path d='M21 12V7H5a2 2 0 0 1 0-4h14v4'></path><path d='M3 5v14a2 2 0 0 0 2 2h16v-5'></path><path d='M18 12a2 2 0 0 0 0 4h4v-4z'></path>"
+  wallet: "<path d='M21 12V7H5a2 2 0 0 1 0-4h14v4'></path><path d='M3 5v14a2 2 0 0 0 2 2h16v-5'></path><path d='M18 12a2 2 0 0 0 0 4h4v-4z'></path>",
+  calendar: "<rect x='3' y='4' width='18' height='18' rx='2'></rect><path d='M16 2v4'></path><path d='M8 2v4'></path><path d='M3 10h18'></path>",
+  folder: "<path d='M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z'></path>",
+  menu: "<path d='M3 6h18'></path><path d='M3 12h18'></path><path d='M3 18h18'></path>"
 };
 const icon = (name) => `<svg aria-hidden="true" viewBox="0 0 24 24">${iconPaths[name] || iconPaths.layout}</svg>`;
 
@@ -336,6 +427,16 @@ function renderAvatar(user) {
   return value.startsWith("data:image/")
     ? `<img class="avatar" src="${value}" alt="">`
     : `<span class="avatar">${escapeHtml(value)}</span>`;
+}
+
+// Reuses canAccessCourse's strict programId equality rather than a new matcher —
+// "program" audience is checked against a course-shaped stub, "course" against the
+// real course record, "all" is always visible.
+function canAccessAnnouncement(user, announcement) {
+  if (!user || user.role !== "student") return true;
+  if (announcement.audienceType === "all") return true;
+  if (announcement.audienceType === "program") return canAccessCourse(user, { programId: announcement.programId });
+  return canAccessCourse(user, courseById(announcement.courseId));
 }
 
 function myCourses() {
@@ -503,7 +604,13 @@ function renderDashboard() {
   const gpa = currentRole() === "student" ? myGpa() : null;
   const completed = courses.filter((course) => (course.progress || 0) >= 100).length;
 
+  const upcomingAnnouncements = state.announcements
+    .filter((item) => canAccessAnnouncement(currentUser, item) && new Date(item.eventAt).getTime() > now)
+    .sort((a, b) => new Date(a.eventAt) - new Date(b.eventAt))
+    .slice(0, 3);
+
   const feedItems = [
+    ...upcomingAnnouncements.map((item) => ({ icon: "calendar", title: item.title, body: `${formatDateTime(item.eventAt)} | ${item.body}` })),
     ...state.notifications.map((note) => ({ icon: note.type === "assignment" ? "file" : "bell", title: note.title, body: note.body })),
     ...state.discussions.flatMap((discussion) => discussion.replies.slice(-1).map((reply) => ({ icon: "messages", title: `${reply.author} replied`, body: discussion.title })))
   ].slice(0, 5);
@@ -560,7 +667,7 @@ function renderJoinedRoom(session, course, isStudyRoom, roomMembers) {
     : `<div class="video-tile primary-tile">${localStream && liveRoom.camera ? `<video id="localVideo" autoplay playsinline muted></video>` : `<div class="tile-placeholder">${renderAvatar(currentUser)}<strong>${escapeHtml(currentUser.name)}</strong><small>${liveRoom.mediaError ? "View-only mode" : "Camera is off"}</small></div>`}<span class="tile-name">${escapeHtml(currentUser.name)} (You)${liveRoom.hand ? " ✋" : ""}</span></div>`;
   const hiddenLocal = liveRoom.screen && localStream && liveRoom.camera ? `<div class="video-tile"><video id="localVideo" autoplay playsinline muted></video><span class="tile-name">${escapeHtml(currentUser.name)} (You)</span></div>` : "";
 
-  return `<section class="live-shell">
+  return `<section class="live-shell ${liveRoom.sideHidden ? "hide-side" : ""}">
     <div class="live-stage">
       <div class="live-topbar"><div><p class="eyebrow">${escapeHtml(course?.code || "VFU")} | ${escapeHtml(course?.title || "Virtual Classroom")}</p><h2>${escapeHtml(isStudyRoom ? session.topic : session.title)}</h2></div><span class="live-pill on"><span class="live-dot"></span> ${isStudyRoom ? "Study room" : "Live"}</span></div>
       <div class="video-grid">${primaryTile}${hiddenLocal}${others.map((user) => `<div class="video-tile"><div class="tile-placeholder">${renderAvatar(user)}<strong>${escapeHtml(user.name)}</strong><small>${escapeHtml(roleLabels[user.role] || user.role)}</small></div></div>`).join("")}</div>
@@ -570,12 +677,13 @@ function renderJoinedRoom(session, course, isStudyRoom, roomMembers) {
         <button class="ctrl-button ${liveRoom.camera ? "" : "active"}" type="button" data-live-action="camera">${icon("video")}<span>${liveRoom.camera ? "Stop Video" : "Start Video"}</span></button>
         <button class="ctrl-button ${liveRoom.screen ? "active" : ""}" type="button" data-live-action="screen">${icon("screen")}<span>${liveRoom.screen ? "Stop Share" : "Share Screen"}</span></button>
         ${!isStudyRoom ? `<button class="ctrl-button ${liveRoom.hand ? "active" : ""}" type="button" data-live-action="hand">${icon("hand")}<span>${liveRoom.hand ? "Lower Hand" : "Raise Hand"}</span></button>` : ""}
+        <button class="ctrl-button" type="button" data-live-side-toggle>${icon("layout")}<span>${liveRoom.sideHidden ? "Show Panel" : "Hide Panel"}</span></button>
         ${isStudyRoom ? `<button class="ctrl-button danger" type="button" data-study-leave>${icon("leave")}<span>Leave Room</span></button>` : `<button class="ctrl-button danger" type="button" data-live-leave>${icon("leave")}<span>Leave Class</span></button>`}
         ${isStudyRoom && session.hostId === currentUser.id ? `<button class="ctrl-button danger" type="button" data-study-close="${escapeHtml(session.id)}">${icon("leave")}<span>Close Room</span></button>` : ""}
         ${isHost ? `<button class="ctrl-button danger" type="button" data-live-end="${escapeHtml(session.id)}">${icon("leave")}<span>End Class</span></button>` : ""}
       </div>
     </div>
-    <aside class="live-side panel">
+    ${liveRoom.sideHidden ? "" : `<aside class="live-side panel">
       <div class="live-tabs">
         <button class="panel-tab ${liveRoom.panel === "chat" ? "active" : ""}" type="button" data-live-panel="chat">${icon("messages")} Chat</button>
         <button class="panel-tab ${liveRoom.panel === "people" ? "active" : ""}" type="button" data-live-panel="people">${icon("users")} Participants (${participants.length})</button>
@@ -583,7 +691,7 @@ function renderJoinedRoom(session, course, isStudyRoom, roomMembers) {
       ${liveRoom.panel === "people"
         ? `<div class="live-side-body"><div class="participant-list">${participants.map((user) => `<article>${renderAvatar(user)}<div><strong>${escapeHtml(user.name)}${user.id === currentUser.id ? " (You)" : ""}</strong><p>${escapeHtml(roleLabels[user.role] || user.role)}</p></div><span class="presence"></span></article>`).join("")}</div><p class="mini-note">Media runs on WebRTC device capture in your browser.</p></div>`
         : `<div class="live-side-body"><div class="chat-stream">${messages.length ? messages.map((message) => `<article class="chat-message"><strong>${escapeHtml(message.author)}</strong><p>${escapeHtml(message.text)}</p></article>`).join("") : `<p class="mini-note">No messages yet. Say hello to the room.</p>`}</div><form class="compose inline" id="chatForm"><input name="message" placeholder="Message the room" autocomplete="off"><button class="action primary" type="submit" title="Send message">${icon("send")}</button></form></div>`}
-    </aside>
+    </aside>`}
   </section>`;
 }
 
@@ -600,11 +708,17 @@ function renderClassroom() {
   const courses = myCourses();
   const canHost = currentRole() !== "student";
 
+  const joinControl = canHost
+    ? `<button class="action primary" type="button" data-live-join="${escapeHtml(live?.id || "")}">${icon("video")} Enter class</button>`
+    : `<form class="submit-form" data-join-session="${escapeHtml(live?.id || "")}"><input name="studentNumber" placeholder="Confirm your student number" value="${escapeHtml(currentUser.studentNumber || "")}" required><button class="action primary" type="submit">${icon("video")} Join Class</button></form>`;
+
   const stage = live
-    ? `<div class="empty-state"><span class="live-pill on"><span class="live-dot"></span> Live now</span><h2>${escapeHtml(live.title)}</h2><p>${escapeHtml(courseById(live.courseId)?.title || "Course")} | started ${formatDateTime(live.startsAt)}</p><div style="margin-top:14px; display:flex; gap:10px; justify-content:center; flex-wrap:wrap;"><button class="action primary" type="button" data-live-join="${escapeHtml(live.id)}">${icon("video")} ${canHost ? "Enter class" : "Join Class"}</button>${canHost ? `<button class="action danger" type="button" data-live-end="${escapeHtml(live.id)}">${icon("leave")} End Class</button>` : ""}</div>${currentRole() === "student" ? `<p class="mini-note" style="margin-top:12px;">Joining marks your attendance as present automatically.</p>` : ""}</div>`
+    ? `<div class="empty-state"><span class="live-pill on"><span class="live-dot"></span> Live now</span><h2>${escapeHtml(live.title)}</h2><p>${escapeHtml(courseById(live.courseId)?.title || "Course")} | started ${formatDateTime(live.startsAt)}</p><div style="margin-top:14px; display:flex; gap:10px; justify-content:center; flex-wrap:wrap;">${joinControl}${canHost ? `<button class="action danger" type="button" data-live-end="${escapeHtml(live.id)}">${icon("leave")} End Class</button>` : ""}</div>${currentRole() === "student" ? `<p class="mini-note" style="margin-top:12px;">Joining marks your attendance as present automatically.</p>` : ""}</div>`
     : canHost
       ? `<form class="form-grid" id="startClassForm"><div class="section-head"><h2>Start a live class</h2></div><label>Course<select name="courseId" required>${courses.map((course) => `<option value="${escapeHtml(course.id)}">${escapeHtml(course.code)} | ${escapeHtml(course.title)}</option>`).join("")}</select></label><label>Session title<input name="title" placeholder="Example: Week 4 REST APIs Lab"></label><label>Duration (minutes)<input name="duration" type="number" min="10" max="480" value="60"></label><button class="action primary" type="submit">${icon("video")} Start class now</button><p class="mini-note">Students in this course's field will see the class instantly and can join. Students who never join are marked absent when you end the class.</p></form>`
       : emptyState("No live class right now", "When your lecturer starts a class for your courses, a Join button appears here and your attendance is marked when you join.");
+
+  const scheduler = canHost ? `<section class="panel"><div class="section-head"><h2>Schedule a future class</h2></div><form class="form-grid" id="scheduleClassForm"><label>Course<select name="courseId" required>${courses.map((course) => `<option value="${escapeHtml(course.id)}">${escapeHtml(course.code)} | ${escapeHtml(course.title)}</option>`).join("")}</select></label><label>Session title<input name="title" placeholder="Example: Week 5 lecture"></label><label>Starts at<input name="startsAt" type="datetime-local" required></label><label>Duration (minutes)<input name="duration" type="number" min="10" max="480" value="60"></label><button class="action primary" type="submit">${icon("clock")} Schedule class</button></form>${upcoming.length ? `<div class="deadline-list" style="margin-top:12px;">${upcoming.map((session) => `<article class="deadline-item"><span class="icon-dot">${icon("clock")}</span><div><strong>${escapeHtml(session.title)}</strong><p>${escapeHtml(courseById(session.courseId)?.title || "Course")} | ${formatDateTime(session.startsAt)}</p></div><button class="action" type="button" data-live-begin="${escapeHtml(session.id)}">${icon("video")} Begin now</button></article>`).join("")}</div>` : ""}</section>` : "";
 
   return `<div class="live-shell">
     <section class="panel">${stage}</section>
@@ -612,7 +726,8 @@ function renderClassroom() {
       const next = upcoming.find((session) => session.courseId === course.id);
       return `<article class="deadline-item"><span class="icon-dot">${icon("book")}</span><div><strong>${escapeHtml(course.title)}</strong><p>${next ? `Next class ${formatDateTime(next.startsAt)}` : escapeHtml(course.schedule || "Schedule to be announced")}</p></div></article>`;
     }).join("") || emptyState("No courses")}</div></aside>
-  </div>`;
+  </div>
+  ${scheduler}`;
 }
 
 /* ============================== attendance ============================== */
@@ -698,9 +813,76 @@ function renderDiscussions() {
 
   return `<section class="panel"><div class="section-head"><h2>Group Study Rooms</h2><span class="status-pill">${rooms.length} open</span></div>
     <form class="form-grid cols-2" id="studyForm" style="margin-bottom:14px;"><label>Course<select name="courseId" required>${courses.map((course) => `<option value="${escapeHtml(course.id)}">${escapeHtml(course.code)} | ${escapeHtml(course.title)}</option>`).join("")}</select></label><label>Study topic<input name="topic" required placeholder="Example: Revision for week 4 quiz"></label><button class="action primary" type="submit" style="grid-column: 1 / -1;">${icon("plus")} Open a study room</button></form>
-    <div class="room-grid">${rooms.length ? rooms.map((room) => `<article class="room-card"><span class="live-pill on"><span class="live-dot"></span> In session</span><h3>${escapeHtml(room.topic)}</h3><p>${escapeHtml(courseById(room.courseId)?.title || "Course")}</p><p>Host: ${escapeHtml(room.hostName)} | ${room.members.length} member${room.members.length === 1 ? "" : "s"}</p><button class="action primary" type="button" data-study-join="${escapeHtml(room.id)}">${icon("video")} Join room</button></article>`).join("") : `<div class="mini-note" style="grid-column: 1 / -1;">No study rooms are open for your courses. Start one and invite your classmates. Rooms are private to students in the same course field.</div>`}</div>
+    <div class="room-grid">${rooms.length ? rooms.map((room) => `<article class="room-card"><span class="live-pill on"><span class="live-dot"></span> In session</span><h3>${escapeHtml(room.topic)}</h3><p>${escapeHtml(courseById(room.courseId)?.title || "Course")}</p><p>Host: ${escapeHtml(room.hostName)} | ${room.members.length} member${room.members.length === 1 ? "" : "s"}</p>${currentRole() === "student" ? `<form class="submit-form" data-join-room="${escapeHtml(room.id)}"><input name="studentNumber" placeholder="Confirm your student number" value="${escapeHtml(currentUser.studentNumber || "")}" required><button class="action primary" type="submit">${icon("video")} Join room</button></form>` : `<button class="action primary" type="button" data-study-join="${escapeHtml(room.id)}">${icon("video")} Join room</button>`}</article>`).join("") : `<div class="mini-note" style="grid-column: 1 / -1;">No study rooms are open for your courses. Start one and invite your classmates. Rooms are private to students in the same course field.</div>`}</div>
   </section>
   <section class="panel"><div class="section-head"><h2>Course discussions</h2><span class="status-pill">${threads.length} threads</span></div><div class="assignment-list">${threads.length ? threads.map((discussion) => `<article class="discussion"><h3>${escapeHtml(discussion.title)}</h3><p>${escapeHtml(courseById(discussion.courseId)?.title || "Course")} | ${discussion.replies.length} replies</p>${discussion.replies.slice(-2).map((reply) => `<div class="reply"><strong>${escapeHtml(reply.author)}</strong><p>${escapeHtml(reply.text)}</p></div>`).join("")}<div style="margin-top:10px;"><button class="action" type="button" data-view-discussion="${escapeHtml(discussion.id)}">${icon("messages")} Reply</button></div></article>`).join("") : emptyState("No discussions yet")}</div></section>`;
+}
+
+/* ============================== calendar / announcements ============================== */
+
+const ANNOUNCEMENT_TYPE_LABELS = { period: "Period", exam: "Exam", meeting: "Meeting", campaign: "Campaign", news: "News", announcement: "Announcement" };
+
+function renderAnnouncements() {
+  const isStaff = currentRole() !== "student";
+  const items = state.announcements
+    .filter((item) => canAccessAnnouncement(currentUser, item))
+    .slice()
+    .sort((a, b) => new Date(a.eventAt) - new Date(b.eventAt));
+
+  const creator = isStaff ? `<section class="panel"><div class="section-head"><h2>Post to the calendar</h2></div><form class="form-grid cols-2" id="announcementForm">
+    <label>Type<select name="type">${Object.entries(ANNOUNCEMENT_TYPE_LABELS).map(([value, label]) => `<option value="${value}">${escapeHtml(label)}</option>`).join("")}</select></label>
+    <label>Date and time<input name="eventAt" type="datetime-local" required></label>
+    <label>Title<input name="title" required placeholder="Mid-semester exam"></label>
+    <label>Audience<select name="audienceType" id="announcementAudience"><option value="all">All students</option><option value="program">A specific program</option><option value="course">A specific course</option></select></label>
+    <label id="announcementProgramField" style="display:none;">Program<select name="programId">${(state.programs || []).map((program) => `<option value="${escapeHtml(program.id)}">${escapeHtml(program.name)}</option>`).join("")}</select></label>
+    <label id="announcementCourseField" style="display:none;">Course<select name="courseId">${state.courses.map((course) => `<option value="${escapeHtml(course.id)}">${escapeHtml(course.code)} | ${escapeHtml(course.title)}</option>`).join("")}</select></label>
+    <label style="grid-column: 1 / -1;">Details<textarea name="body" placeholder="Details students should know" style="min-height:70px;"></textarea></label>
+    <button class="action primary" type="submit" style="grid-column: 1 / -1;">${icon("plus")} Post</button>
+  </form></section>` : "";
+
+  const list = items.length ? items.map((item) => `<article class="deadline-item"><span class="icon-dot">${icon("calendar")}</span><div><strong>${escapeHtml(item.title)}</strong><p>${escapeHtml(ANNOUNCEMENT_TYPE_LABELS[item.type] || item.type)} | ${formatDateTime(item.eventAt)}</p>${item.body ? `<p>${escapeHtml(item.body)}</p>` : ""}</div></article>`).join("") : emptyState("Nothing on the calendar yet", "Announcements, exams, and meetings will show up here.");
+
+  return `${creator}<section class="panel"><div class="section-head"><h2>Calendar</h2><span class="status-pill">${items.length} upcoming</span></div><div class="deadline-list">${list}</div></section>`;
+}
+
+/* ============================== tutorials ============================== */
+
+function renderTutorials() {
+  const isStaff = currentRole() !== "student";
+  const tutorials = state.tutorials.filter((item) => canAccessCourse(currentUser, { programId: item.programId }));
+
+  const creator = isStaff ? `<section class="panel"><div class="section-head"><h2>Add tutorial</h2></div><form class="form-grid cols-2" id="tutorialForm">
+    <label>Title<input name="title" required placeholder="REST API fundamentals"></label>
+    <label>Program<select name="programId" required>${(state.programs || []).map((program) => `<option value="${escapeHtml(program.id)}">${escapeHtml(program.name)}</option>`).join("")}</select></label>
+    <label style="grid-column: 1 / -1;">Video URL<input name="videoUrl" type="url" required placeholder="https://..."></label>
+    <label style="grid-column: 1 / -1;">Description<textarea name="description" style="min-height:60px;"></textarea></label>
+    <button class="action primary" type="submit" style="grid-column: 1 / -1;">${icon("plus")} Save tutorial</button>
+  </form></section>` : "";
+
+  const list = tutorials.length ? tutorials.map((item) => `<article class="course-card"><div class="course-body"><h3>${escapeHtml(item.title)}</h3><p>${escapeHtml(programById(item.programId)?.name || "")}</p>${item.description ? `<p class="next-up">${escapeHtml(item.description)}</p>` : ""}<a class="action primary" href="${escapeHtml(item.videoUrl)}" target="_blank" rel="noopener">${icon("video")} Watch</a></div></article>`).join("") : emptyState("No tutorials for your program yet");
+
+  return `${creator}<section class="panel"><div class="section-head"><h2>Tutorials</h2><span class="status-pill">${tutorials.length} available</span></div><div class="grid course-grid">${list}</div></section>`;
+}
+
+/* ============================== materials library ============================== */
+
+function renderLibrary() {
+  const isStaff = currentRole() !== "student";
+  const materials = state.materials.filter((item) => item.courseId ? canAccessCourse(currentUser, courseById(item.courseId)) : canAccessCourse(currentUser, { programId: item.programId }));
+
+  const creator = isStaff ? `<section class="panel"><div class="section-head"><h2>Upload material</h2></div><form class="form-grid cols-2" id="materialForm">
+    <label>Title<input name="title" required placeholder="Week 4 lecture slides"></label>
+    <label>Scope<select name="scopeType" id="materialScope"><option value="course">A specific course</option><option value="program">A whole program</option></select></label>
+    <label id="materialCourseField">Course<select name="courseId">${state.courses.map((course) => `<option value="${escapeHtml(course.id)}">${escapeHtml(course.code)} | ${escapeHtml(course.title)}</option>`).join("")}</select></label>
+    <label id="materialProgramField" style="display:none;">Program<select name="programId">${(state.programs || []).map((program) => `<option value="${escapeHtml(program.id)}">${escapeHtml(program.name)}</option>`).join("")}</select></label>
+    <label style="grid-column: 1 / -1;">Description<textarea name="description" style="min-height:60px;"></textarea></label>
+    <div class="file-row" style="grid-column: 1 / -1;">${icon("upload")}<input type="file" name="file" id="materialFileInput"><span id="materialFileStatus">Attach a file (max ~600 KB)</span></div>
+    <button class="action primary" type="submit" style="grid-column: 1 / -1;">${icon("upload")} Upload</button>
+  </form></section>` : "";
+
+  const list = materials.length ? `<div class="table-scroll"><table class="data-table"><thead><tr><th>Title</th><th>Scope</th><th>File</th><th></th></tr></thead><tbody>${materials.map((item) => `<tr><td>${escapeHtml(item.title)}</td><td>${escapeHtml(item.courseId ? (courseById(item.courseId)?.title || "Course") : (programById(item.programId)?.name || "Program"))}</td><td>${escapeHtml(item.fileName)}</td><td><a class="action" href="${item.fileData}" download="${escapeHtml(item.fileName)}">${icon("upload")} Download</a></td></tr>`).join("")}</tbody></table></div>` : emptyState("No materials yet");
+
+  return `${creator}<section class="panel"><div class="section-head"><h2>Materials Library</h2><span class="status-pill">${materials.length} files</span></div>${list}</section>`;
 }
 
 /* ============================== analytics ============================== */
@@ -816,6 +998,10 @@ function renderProfile() {
 
 function renderShell() {
   document.body.classList.toggle("auth-mode", !currentUser);
+  appShell?.classList.toggle("sidebar-collapsed", sidebarCollapsed);
+  if (sidebarToggleSlot) {
+    sidebarToggleSlot.innerHTML = currentUser ? `<button class="icon-button" type="button" data-sidebar-toggle title="${sidebarCollapsed ? "Show sidebar" : "Hide sidebar"}" aria-expanded="${!sidebarCollapsed}">${icon("menu")}</button>` : "";
+  }
   termLabel.textContent = state?.institution?.term || "VFU";
   navList.innerHTML = visibleRoutes().map((route) => `<button class="nav-item ${route.id === currentRoute ? "active" : ""}" type="button" data-route="${route.id}">${icon(route.icon)}<span>${route.label}</span></button>`).join("");
   if (sessionPanel) {
@@ -841,7 +1027,8 @@ function render() {
   const viewMap = {
     dashboard: renderDashboard, courses: renderCourses, classroom: renderClassroom,
     attendance: renderAttendance, assignments: renderAssignments, discussions: renderDiscussions,
-    analytics: renderAnalytics, admin: renderAdmin, programs: renderPrograms, profile: renderProfile
+    analytics: renderAnalytics, admin: renderAdmin, programs: renderPrograms, profile: renderProfile,
+    announcements: renderAnnouncements, tutorials: renderTutorials, library: renderLibrary
   };
   viewRoot.innerHTML = (viewMap[currentRoute] || viewMap.dashboard)();
   afterRender();
@@ -888,15 +1075,31 @@ async function handleAuthSubmit(event) {
   }
 }
 
-async function joinLiveSession(sessionId) {
+async function joinLiveSession(sessionId, studentNumber) {
   try {
-    await api("/api/sessions/join", { method: "POST", body: { sessionId, userId: currentUser.id } });
+    await api("/api/sessions/join", { method: "POST", body: { sessionId, userId: currentUser.id, studentNumber } });
     liveRoom.sessionId = sessionId;
     liveRoom.messages = [];
     liveRoom.hand = false;
+    liveRoom.sideHidden = false;
     await startLocalMedia();
     await loadState();
     showToast(currentRole() === "student" ? "You joined the class. Attendance marked present." : "You are in the live class.");
+  } catch (error) {
+    showToast(error.message, "error");
+  }
+}
+
+async function beginScheduledSession(sessionId) {
+  try {
+    const response = await api("/api/sessions/begin", { method: "POST", body: { sessionId, userId: currentUser.id } });
+    liveRoom.sessionId = response.session.id;
+    liveRoom.messages = [];
+    liveRoom.hand = false;
+    liveRoom.sideHidden = false;
+    await startLocalMedia();
+    await loadState();
+    showToast("Scheduled class started. Students can now join.");
   } catch (error) {
     showToast(error.message, "error");
   }
@@ -984,6 +1187,25 @@ function handleAvatarFileSelected(input) {
   reader.readAsDataURL(file);
 }
 
+function handleMaterialFileSelected(input) {
+  const file = input.files?.[0];
+  const status = document.getElementById("materialFileStatus");
+  if (!file) { pendingMaterialFile = null; if (status) status.textContent = "Attach a file (max ~600 KB)"; return; }
+  if (file.size > 600 * 1024) {
+    input.value = "";
+    pendingMaterialFile = null;
+    if (status) status.textContent = "File is too large. Keep it under 600 KB.";
+    showToast("File is too large. Keep it under 600 KB.", "warning");
+    return;
+  }
+  const reader = new FileReader();
+  reader.onload = () => {
+    pendingMaterialFile = { name: file.name, type: file.type, size: file.size, data: String(reader.result || "") };
+    if (status) status.textContent = `${file.name} (${(file.size / 1024).toFixed(1)} KB) ready`;
+  };
+  reader.readAsDataURL(file);
+}
+
 async function handleDiscussionReply(discussionId) {
   const text = window.prompt("Write a reply to the discussion:", "");
   if (text === null || !text.trim()) return;
@@ -996,11 +1218,12 @@ async function handleDiscussionReply(discussionId) {
   }
 }
 
-async function joinStudy(roomId) {
+async function joinStudy(roomId, studentNumber) {
   try {
-    await api("/api/studyrooms/join", { method: "POST", body: { roomId, userId: currentUser.id } });
+    await api("/api/studyrooms/join", { method: "POST", body: { roomId, userId: currentUser.id, studentNumber } });
     studyState.roomId = roomId;
     studyState.messages = [];
+    liveRoom.sideHidden = false;
     await startLocalMedia();
     await loadState();
     showToast("You joined the study room.");
@@ -1038,6 +1261,12 @@ function handleViewInteraction(event) {
   if (data.route) return setRoute(data.route);
   if (data.routeJump) return setRoute(data.routeJump);
   if (data.themeSet) return applyTheme(data.themeSet);
+  if ("sidebarToggle" in data) {
+    sidebarCollapsed = !sidebarCollapsed;
+    localStorage.setItem(sidebarKey, sidebarCollapsed ? "collapsed" : "expanded");
+    render();
+    return;
+  }
 
   if (data.logout !== undefined && "logout" in data) {
     api("/api/logout", { method: "POST" }).catch(() => {});
@@ -1051,9 +1280,11 @@ function handleViewInteraction(event) {
 
   if (data.authMode) { authMode = data.authMode; render(); return; }
   if (data.liveJoin) return void joinLiveSession(data.liveJoin);
+  if (data.liveBegin) return void beginScheduledSession(data.liveBegin);
   if (data.liveEnd) return void endLiveSession(data.liveEnd);
   if ("liveLeave" in data) return leaveLiveSession();
   if (data.liveAction) return void handleLiveAction(data.liveAction);
+  if ("liveSideToggle" in data) { liveRoom.sideHidden = !liveRoom.sideHidden; render(); return; }
   if (data.livePanel) { liveRoom.panel = data.livePanel; render(); return; }
   if (data.studyJoin) return void joinStudy(data.studyJoin);
   if ("studyLeave" in data) return leaveStudy();
@@ -1175,9 +1406,76 @@ function registerAppEvents() {
         const response = await api("/api/sessions/start", { method: "POST", body: { ...payload, userId: currentUser.id } });
         liveRoom.sessionId = response.session.id;
         liveRoom.messages = [];
+        liveRoom.sideHidden = false;
         await startLocalMedia();
         await loadState();
         showToast("Live class started. Students can now join.");
+      } catch (error) { showToast(error.message, "error"); }
+      return;
+    }
+
+    if (form.id === "scheduleClassForm") {
+      event.preventDefault();
+      const payload = Object.fromEntries(new FormData(form).entries());
+      try {
+        await api("/api/sessions/schedule", { method: "POST", body: { ...payload, userId: currentUser.id } });
+        form.reset();
+        await loadState();
+        showToast("Class scheduled.");
+      } catch (error) { showToast(error.message, "error"); }
+      return;
+    }
+
+    if (form.dataset.joinSession) {
+      event.preventDefault();
+      const studentNumber = String(new FormData(form).get("studentNumber") || "").trim();
+      await joinLiveSession(form.dataset.joinSession, studentNumber);
+      return;
+    }
+
+    if (form.dataset.joinRoom) {
+      event.preventDefault();
+      const studentNumber = String(new FormData(form).get("studentNumber") || "").trim();
+      await joinStudy(form.dataset.joinRoom, studentNumber);
+      return;
+    }
+
+    if (form.id === "announcementForm") {
+      event.preventDefault();
+      try {
+        await api("/api/announcements", { method: "POST", body: { ...Object.fromEntries(new FormData(form).entries()), actingUserId: currentUser.id } });
+        form.reset();
+        await loadState();
+        showToast("Posted to the calendar.");
+      } catch (error) { showToast(error.message, "error"); }
+      return;
+    }
+
+    if (form.id === "tutorialForm") {
+      event.preventDefault();
+      try {
+        await api("/api/tutorials", { method: "POST", body: { ...Object.fromEntries(new FormData(form).entries()), actingUserId: currentUser.id } });
+        form.reset();
+        await loadState();
+        showToast("Tutorial added.");
+      } catch (error) { showToast(error.message, "error"); }
+      return;
+    }
+
+    if (form.id === "materialForm") {
+      event.preventDefault();
+      if (!pendingMaterialFile) { showToast("Attach a file first.", "warning"); return; }
+      const payload = Object.fromEntries(new FormData(form).entries());
+      const scopeType = payload.scopeType;
+      delete payload.scopeType;
+      if (scopeType === "program") delete payload.courseId;
+      else delete payload.programId;
+      try {
+        await api("/api/materials", { method: "POST", body: { ...payload, fileName: pendingMaterialFile.name, fileType: pendingMaterialFile.type, fileSize: pendingMaterialFile.size, fileData: pendingMaterialFile.data, actingUserId: currentUser.id } });
+        pendingMaterialFile = null;
+        form.reset();
+        await loadState();
+        showToast("Material uploaded.");
       } catch (error) { showToast(error.message, "error"); }
       return;
     }
@@ -1220,6 +1518,24 @@ function registerAppEvents() {
   document.addEventListener("change", (event) => {
     if (event.target.matches("input[type='file'][data-file-for]")) handleFileSelected(event.target);
     if (event.target.id === "avatarInput") handleAvatarFileSelected(event.target);
+    if (event.target.id === "materialFileInput") handleMaterialFileSelected(event.target);
+
+    if (event.target.id === "announcementAudience") {
+      const showProgram = event.target.value === "program";
+      const showCourse = event.target.value === "course";
+      const programField = document.getElementById("announcementProgramField");
+      const courseField = document.getElementById("announcementCourseField");
+      if (programField) programField.style.display = showProgram ? "" : "none";
+      if (courseField) courseField.style.display = showCourse ? "" : "none";
+    }
+
+    if (event.target.id === "materialScope") {
+      const showProgram = event.target.value === "program";
+      const programField = document.getElementById("materialProgramField");
+      const courseField = document.getElementById("materialCourseField");
+      if (programField) programField.style.display = showProgram ? "" : "none";
+      if (courseField) courseField.style.display = showProgram ? "none" : "";
+    }
   });
 
   notificationButton?.addEventListener("click", () => {

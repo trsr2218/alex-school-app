@@ -113,6 +113,19 @@ h1, h2, h3, p { overflow-wrap: anywhere; }
   display: grid;
   grid-template-columns: 250px minmax(0, 1fr);
   min-height: 100vh;
+  transition: grid-template-columns 0.2s ease;
+}
+
+.app-shell.sidebar-collapsed { grid-template-columns: 72px minmax(0, 1fr); }
+
+.sidebar-collapsed .sidebar .brand strong,
+.sidebar-collapsed .sidebar .brand small,
+.sidebar-collapsed .sidebar .nav-item span,
+.sidebar-collapsed .sidebar .session-card-mini strong,
+.sidebar-collapsed .sidebar .session-card-mini small,
+.sidebar-collapsed .sidebar .session-logout span,
+.sidebar-collapsed .sidebar .session-hint {
+  display: none;
 }
 
 .sidebar {
@@ -631,6 +644,8 @@ h1 { margin: 0; color: var(--ink); font-size: 26px; line-height: 1.1; }
   gap: 14px;
   align-items: stretch;
 }
+
+.live-shell.hide-side { grid-template-columns: minmax(0, 1fr); }
 
 .live-stage {
   display: grid;
@@ -1164,6 +1179,7 @@ body.auth-mode #viewRoot { width: 100%; min-height: 100vh; display: flex; align-
   .session-panel { margin-top: 0; min-width: 200px; }
   .auth-layout { grid-template-columns: 1fr; }
   .auth-visual { display: none; }
+  .app-shell.sidebar-collapsed .sidebar { display: none; }
 }
 
 @media (max-width: 640px) {

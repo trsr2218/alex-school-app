@@ -233,6 +233,44 @@ window.VFU_SEED_STATE = {
       "read": false
     }
   ],
+  "announcements": [
+    {
+      "id": "announce-1",
+      "type": "exam",
+      "title": "ICT 351 mid-semester exam",
+      "body": "Covers weeks 1 to 4. Bring your student card.",
+      "eventAt": "2026-08-10T09:00:00.000Z",
+      "audienceType": "program",
+      "programId": "prog-ict",
+      "courseId": null,
+      "authorId": "u-lecturer-1",
+      "createdAt": "2026-07-20T08:00:00.000Z"
+    },
+    {
+      "id": "announce-2",
+      "type": "announcement",
+      "title": "Semester registration deadline",
+      "body": "All students must confirm registration by the end of the month.",
+      "eventAt": "2026-08-31T17:00:00.000Z",
+      "audienceType": "all",
+      "programId": null,
+      "courseId": null,
+      "authorId": "u-admin-1",
+      "createdAt": "2026-07-18T08:00:00.000Z"
+    }
+  ],
+  "tutorials": [
+    {
+      "id": "tutorial-1",
+      "title": "REST API fundamentals",
+      "description": "A walkthrough of building a secure REST API from scratch.",
+      "videoUrl": "https://www.youtube.com/results?search_query=rest+api+fundamentals",
+      "programId": "prog-ict",
+      "authorId": "u-lecturer-1",
+      "createdAt": "2026-06-01T08:00:00.000Z"
+    }
+  ],
+  "materials": [],
   "analytics": {
     "activeStudents": 118,
     "attendanceRate": 86,

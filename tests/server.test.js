@@ -139,7 +139,7 @@ test('live class flow: start, join marks present, end marks missing students abs
     const join = await requestJson(`http://127.0.0.1:${port}/api/sessions/join`, {
       method: 'POST',
       headers: { authorization: `Bearer ${studentToken}` },
-      body: { sessionId }
+      body: { sessionId, studentNumber: 'VFU-ST-2026-001' }
     });
     assert.equal(join.status, 200);
     assert.ok(join.payload.attendance.some(
@@ -297,4 +297,112 @@ test('strict program access denies a course with no matching programId (no more 
     body: { courseId: course.payload.course.id, topic: 'Should be denied' }
   });
   assert.equal(joinAttempt.status, 403);
+});
+
+// Phase 2A tests below reuse the same shared server/tokens as the Phase 1 tests above.
+
+test('announcements, tutorials, and materials are staff-only to create', async () => {
+  const announceAttempt = await requestJson(`http://127.0.0.1:${phase1Port}/api/announcements`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${phase1Tokens.student}` },
+    body: { title: 'Hack attempt', eventAt: new Date(Date.now() + 86400000).toISOString(), audienceType: 'all' }
+  });
+  assert.equal(announceAttempt.status, 403);
+
+  const announceOk = await requestJson(`http://127.0.0.1:${phase1Port}/api/announcements`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${phase1Tokens.admin}` },
+    body: { title: 'Registration deadline', eventAt: new Date(Date.now() + 86400000).toISOString(), audienceType: 'all' }
+  });
+  assert.equal(announceOk.status, 201);
+
+  const tutorialAttempt = await requestJson(`http://127.0.0.1:${phase1Port}/api/tutorials`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${phase1Tokens.student}` },
+    body: { title: 'Hack attempt', videoUrl: 'https://example.com/video', programId: 'prog-ict' }
+  });
+  assert.equal(tutorialAttempt.status, 403);
+
+  const tutorialOk = await requestJson(`http://127.0.0.1:${phase1Port}/api/tutorials`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${phase1Tokens.lecturer}` },
+    body: { title: 'Intro to networking', videoUrl: 'https://example.com/video', programId: 'prog-ict' }
+  });
+  assert.equal(tutorialOk.status, 201);
+
+  const materialAttempt = await requestJson(`http://127.0.0.1:${phase1Port}/api/materials`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${phase1Tokens.student}` },
+    body: { title: 'Hack attempt', programId: 'prog-ict', fileName: 'notes.txt', fileData: `data:text/plain;base64,${Buffer.from('hi').toString('base64')}` }
+  });
+  assert.equal(materialAttempt.status, 403);
+
+  const materialOk = await requestJson(`http://127.0.0.1:${phase1Port}/api/materials`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${phase1Tokens.admin}` },
+    body: { title: 'Week 1 slides', programId: 'prog-ict', fileName: 'slides.txt', fileData: `data:text/plain;base64,${Buffer.from('hi').toString('base64')}` }
+  });
+  assert.equal(materialOk.status, 201);
+});
+
+test('scheduling a live class requires a future date, and a scheduled session can be begun (Scheduled -> Live)', async () => {
+  const pastAttempt = await requestJson(`http://127.0.0.1:${phase1Port}/api/sessions/schedule`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${phase1Tokens.lecturer}` },
+    body: { courseId: 'course-net', title: 'Past class', startsAt: new Date(Date.now() - 86400000).toISOString() }
+  });
+  assert.equal(pastAttempt.status, 400);
+
+  const scheduled = await requestJson(`http://127.0.0.1:${phase1Port}/api/sessions/schedule`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${phase1Tokens.lecturer}` },
+    body: { courseId: 'course-net', title: 'Future class', startsAt: new Date(Date.now() + 86400000).toISOString() }
+  });
+  assert.equal(scheduled.status, 201);
+  assert.equal(scheduled.payload.session.status, 'Scheduled');
+
+  const begun = await requestJson(`http://127.0.0.1:${phase1Port}/api/sessions/begin`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${phase1Tokens.lecturer}` },
+    body: { sessionId: scheduled.payload.session.id }
+  });
+  assert.equal(begun.status, 200);
+  assert.equal(begun.payload.session.status, 'Live');
+
+  // Clean up so this Live session doesn't linger and interfere with other tests.
+  await requestJson(`http://127.0.0.1:${phase1Port}/api/sessions/end`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${phase1Tokens.lecturer}` },
+    body: { sessionId: scheduled.payload.session.id }
+  });
+});
+
+test('joining a live class with the wrong student number is rejected', async () => {
+  const start = await requestJson(`http://127.0.0.1:${phase1Port}/api/sessions/start`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${phase1Tokens.lecturer}` },
+    body: { courseId: 'course-db', title: 'Student number check' }
+  });
+  assert.equal(start.status, 201);
+  const sessionId = start.payload.session.id;
+
+  const wrongNumber = await requestJson(`http://127.0.0.1:${phase1Port}/api/sessions/join`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${phase1Tokens.student}` },
+    body: { sessionId, studentNumber: 'WRONG-NUMBER' }
+  });
+  assert.equal(wrongNumber.status, 403);
+
+  const correctNumber = await requestJson(`http://127.0.0.1:${phase1Port}/api/sessions/join`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${phase1Tokens.student}` },
+    body: { sessionId, studentNumber: 'VFU-ST-2026-001' }
+  });
+  assert.equal(correctNumber.status, 200);
+
+  await requestJson(`http://127.0.0.1:${phase1Port}/api/sessions/end`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${phase1Tokens.lecturer}` },
+    body: { sessionId }
+  });
 });

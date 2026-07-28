@@ -311,6 +311,9 @@ const defaultData = {
   discussions: [],
   studyRooms: [],
   notifications: [],
+  announcements: [],
+  tutorials: [],
+  materials: [],
   analytics: {
     activeStudents: 0,
     attendanceRate: 0,
@@ -366,6 +369,9 @@ function ensureDataShape(data) {
     discussions: Array.isArray(normalized.discussions) ? normalized.discussions : [],
     studyRooms: Array.isArray(normalized.studyRooms) ? normalized.studyRooms : [],
     notifications: Array.isArray(normalized.notifications) ? normalized.notifications : [],
+    announcements: Array.isArray(normalized.announcements) ? normalized.announcements : [],
+    tutorials: Array.isArray(normalized.tutorials) ? normalized.tutorials : [],
+    materials: Array.isArray(normalized.materials) ? normalized.materials : [],
     sessions: Array.isArray(normalized.sessions) ? normalized.sessions : [],
     analytics: normalized.analytics && typeof normalized.analytics === "object" ? normalized.analytics : defaultData.analytics
   };
@@ -872,6 +878,61 @@ function startClassSession(res, data, body, authUser) {
   sendJson(res, 201, { session, classSessions: data.classSessions });
 }
 
+function scheduleClassSession(res, data, body, authUser) {
+  const course = data.courses.find((item) => item.id === body.courseId);
+  if (!course) {
+    sendJson(res, 404, { error: "Course was not found." });
+    return;
+  }
+
+  const startsAt = new Date(body.startsAt || "");
+  if (Number.isNaN(startsAt.getTime()) || startsAt.getTime() <= Date.now()) {
+    sendJson(res, 400, { error: "Scheduled time must be a valid date in the future." });
+    return;
+  }
+
+  const duration = Number(body.duration);
+  const session = {
+    id: `session-${Date.now()}`,
+    courseId: course.id,
+    title: sanitizeText(body.title) || `${course.title} live class`,
+    startsAt: startsAt.toISOString(),
+    duration: duration > 0 ? Math.min(duration, 480) : 60,
+    status: "Scheduled",
+    participants: 0,
+    hostId: authUser.id
+  };
+
+  data.classSessions.push(session);
+  writeData(data);
+  sendJson(res, 201, { session, classSessions: data.classSessions });
+}
+
+function beginScheduledSession(res, data, body, authUser) {
+  const session = data.classSessions.find((item) => item.id === body.sessionId);
+  if (!session) {
+    sendJson(res, 404, { error: "Class session was not found." });
+    return;
+  }
+
+  if (session.status !== "Scheduled") {
+    sendJson(res, 409, { error: "This session is not in a scheduled state." });
+    return;
+  }
+
+  if (data.classSessions.some((item) => item.courseId === session.courseId && item.status === "Live")) {
+    sendJson(res, 409, { error: "A live class is already running for this course." });
+    return;
+  }
+
+  session.status = "Live";
+  session.startsAt = new Date().toISOString();
+  session.hostId = authUser.id;
+
+  writeData(data);
+  sendJson(res, 200, { session, classSessions: data.classSessions });
+}
+
 function joinClassSession(res, data, body, authUser) {
   const session = data.classSessions.find((item) => item.id === body.sessionId);
   if (!session) {
@@ -888,6 +949,11 @@ function joinClassSession(res, data, body, authUser) {
   const user = data.users.find((item) => item.id === authUser.id) || authUser;
   if (!canAccessCourse(user, course)) {
     sendJson(res, 403, { error: "This class is only open to students enrolled in its field." });
+    return;
+  }
+
+  if (user.role === "student" && user.studentNumber && sanitizeText(body.studentNumber) !== user.studentNumber) {
+    sendJson(res, 403, { error: "The student number you entered does not match our records." });
     return;
   }
 
@@ -992,6 +1058,11 @@ function joinStudyRoom(res, data, body, authUser) {
     return;
   }
 
+  if (user.role === "student" && user.studentNumber && sanitizeText(body.studentNumber) !== user.studentNumber) {
+    sendJson(res, 403, { error: "The student number you entered does not match our records." });
+    return;
+  }
+
   if (!room.members.includes(user.id)) {
     room.members.push(user.id);
     writeData(data);
@@ -1042,6 +1113,148 @@ function addForumMessage(res, data, body) {
 
   writeData(data);
   sendJson(res, 200, { discussions: data.discussions, message: "Reply posted." });
+}
+
+const ANNOUNCEMENT_TYPES = ["period", "exam", "meeting", "campaign", "news", "announcement"];
+
+function createAnnouncement(res, data, body, authUser) {
+  const title = sanitizeText(body.title);
+  const type = ANNOUNCEMENT_TYPES.includes(String(body.type)) ? body.type : "announcement";
+  const audienceType = ["all", "program", "course"].includes(String(body.audienceType)) ? body.audienceType : "all";
+  const eventAt = new Date(body.eventAt || "");
+
+  if (!title) {
+    sendJson(res, 400, { error: "Title is required." });
+    return;
+  }
+  if (Number.isNaN(eventAt.getTime())) {
+    sendJson(res, 400, { error: "A valid event date/time is required." });
+    return;
+  }
+
+  let programId = null;
+  let courseId = null;
+  if (audienceType === "program") {
+    programId = sanitizeText(body.programId);
+    if (!programId || !data.programs.some((program) => program.id === programId)) {
+      sendJson(res, 400, { error: "Program was not found." });
+      return;
+    }
+  } else if (audienceType === "course") {
+    courseId = sanitizeText(body.courseId);
+    if (!courseId || !data.courses.some((course) => course.id === courseId)) {
+      sendJson(res, 400, { error: "Course was not found." });
+      return;
+    }
+  }
+
+  const announcement = {
+    id: `announce-${Date.now()}`,
+    type,
+    title,
+    body: sanitizeText(body.body),
+    eventAt: eventAt.toISOString(),
+    audienceType,
+    programId,
+    courseId,
+    authorId: authUser.id,
+    createdAt: new Date().toISOString()
+  };
+
+  data.announcements.push(announcement);
+  writeData(data);
+  sendJson(res, 201, { announcement, announcements: data.announcements });
+}
+
+function createTutorial(res, data, body, authUser) {
+  const title = sanitizeText(body.title);
+  const videoUrl = sanitizeText(body.videoUrl);
+  const programId = sanitizeText(body.programId);
+
+  if (!title || !videoUrl) {
+    sendJson(res, 400, { error: "Title and a video URL are required." });
+    return;
+  }
+  if (!/^https?:\/\//i.test(videoUrl)) {
+    sendJson(res, 400, { error: "Video URL must start with http:// or https://." });
+    return;
+  }
+  if (!programId || !data.programs.some((program) => program.id === programId)) {
+    sendJson(res, 400, { error: "A valid program is required." });
+    return;
+  }
+
+  const tutorial = {
+    id: `tutorial-${Date.now()}`,
+    title,
+    description: sanitizeText(body.description),
+    videoUrl,
+    programId,
+    authorId: authUser.id,
+    createdAt: new Date().toISOString()
+  };
+
+  data.tutorials.push(tutorial);
+  writeData(data);
+  sendJson(res, 201, { tutorial, tutorials: data.tutorials });
+}
+
+function uploadMaterial(res, data, body, authUser) {
+  const title = sanitizeText(body.title);
+  const courseId = sanitizeText(body.courseId) || null;
+  const programId = sanitizeText(body.programId) || null;
+  const fileName = sanitizeText(body.fileName);
+  const fileData = typeof body.fileData === "string" && body.fileData.startsWith("data:") && body.fileData.length <= 800_000
+    ? body.fileData
+    : "";
+
+  if (!title) {
+    sendJson(res, 400, { error: "Title is required." });
+    return;
+  }
+  if (!fileName || !fileData) {
+    sendJson(res, 400, { error: "A file (under ~600KB) is required." });
+    return;
+  }
+  if (Boolean(courseId) === Boolean(programId)) {
+    sendJson(res, 400, { error: "Choose exactly one of course or program for this material." });
+    return;
+  }
+
+  let course = null;
+  if (courseId) {
+    course = data.courses.find((item) => item.id === courseId);
+    if (!course) {
+      sendJson(res, 400, { error: "Course was not found." });
+      return;
+    }
+    if (authUser.role === "lecturer" && course.lecturerId !== authUser.id) {
+      sendJson(res, 403, { error: "You can only upload materials for courses assigned to you." });
+      return;
+    }
+  }
+  if (programId && !data.programs.some((program) => program.id === programId)) {
+    sendJson(res, 400, { error: "Program was not found." });
+    return;
+  }
+
+  const material = {
+    id: `material-${Date.now()}`,
+    title,
+    description: sanitizeText(body.description),
+    courseId,
+    programId,
+    fileName,
+    fileType: sanitizeText(body.fileType),
+    fileSize: Number(body.fileSize) > 0 ? Number(body.fileSize) : 0,
+    fileData,
+    authorId: authUser.id,
+    createdAt: new Date().toISOString()
+  };
+
+  data.materials.push(material);
+  writeData(data);
+  sendJson(res, 201, { material, materials: data.materials });
 }
 
 function createProgram(res, data, body) {
@@ -1264,6 +1477,27 @@ async function handleApi(req, res) {
       return;
     }
 
+    if (req.method === "POST" && pathname === "/api/announcements") {
+      const auth = requireSession(req, res, data); if (!auth) return;
+      if (!requireRole(auth, res, STAFF_ROLES)) return;
+      createAnnouncement(res, data, body, auth.user);
+      return;
+    }
+
+    if (req.method === "POST" && pathname === "/api/tutorials") {
+      const auth = requireSession(req, res, data); if (!auth) return;
+      if (!requireRole(auth, res, STAFF_ROLES)) return;
+      createTutorial(res, data, body, auth.user);
+      return;
+    }
+
+    if (req.method === "POST" && pathname === "/api/materials") {
+      const auth = requireSession(req, res, data); if (!auth) return;
+      if (!requireRole(auth, res, STAFF_ROLES)) return;
+      uploadMaterial(res, data, body, auth.user);
+      return;
+    }
+
     if (req.method === "POST" && pathname === "/api/admin/users") {
       const auth = requireSession(req, res, data); if (!auth) return;
       if (!requireRole(auth, res, ["admin"])) return;
@@ -1295,6 +1529,20 @@ async function handleApi(req, res) {
       const auth = requireSession(req, res, data); if (!auth) return;
       if (!requireRole(auth, res, STAFF_ROLES)) return;
       startClassSession(res, data, body, auth.user);
+      return;
+    }
+
+    if (req.method === "POST" && pathname === "/api/sessions/schedule") {
+      const auth = requireSession(req, res, data); if (!auth) return;
+      if (!requireRole(auth, res, STAFF_ROLES)) return;
+      scheduleClassSession(res, data, body, auth.user);
+      return;
+    }
+
+    if (req.method === "POST" && pathname === "/api/sessions/begin") {
+      const auth = requireSession(req, res, data); if (!auth) return;
+      if (!requireRole(auth, res, STAFF_ROLES)) return;
+      beginScheduledSession(res, data, body, auth.user);
       return;
     }
 

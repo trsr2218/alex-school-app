@@ -4,6 +4,18 @@
     "tagline": "Interactive learning, attendance, collaboration, and academic monitoring.",
     "term": "June 2026 Semester"
   },
+  "programs": [
+    {
+      "id": "prog-ict",
+      "name": "Information and Communication Technology",
+      "code": "ICT"
+    },
+    {
+      "id": "prog-biz",
+      "name": "Business and Financial Management",
+      "code": "BIZ"
+    }
+  ],
   "users": [
     {
       "id": "u-student-1",
@@ -15,7 +27,8 @@
       "avatar": "AL",
       "createdAt": "2026-01-12T08:00:00.000Z",
       "pendingBalance": 2500,
-      "passwordHash": "scrypt$358ffba2ff3db1cc8600a70a509c854b$79c4967a8538e8fdfce472b25a37ab1ee48ee2799ead299cdcb77270a76b314233c8d292fd0260eb9eede868ef08fedbc9898eafae0693e4988fba082c1d336e"
+      "passwordHash": "scrypt$358ffba2ff3db1cc8600a70a509c854b$79c4967a8538e8fdfce472b25a37ab1ee48ee2799ead299cdcb77270a76b314233c8d292fd0260eb9eede868ef08fedbc9898eafae0693e4988fba082c1d336e",
+      "programId": "prog-ict"
     },
     {
       "id": "u-student-2",
@@ -27,7 +40,8 @@
       "avatar": "BM",
       "createdAt": "2026-01-15T08:00:00.000Z",
       "pendingBalance": 1800,
-      "passwordHash": "scrypt$358ffba2ff3db1cc8600a70a509c854b$79c4967a8538e8fdfce472b25a37ab1ee48ee2799ead299cdcb77270a76b314233c8d292fd0260eb9eede868ef08fedbc9898eafae0693e4988fba082c1d336e"
+      "passwordHash": "scrypt$358ffba2ff3db1cc8600a70a509c854b$79c4967a8538e8fdfce472b25a37ab1ee48ee2799ead299cdcb77270a76b314233c8d292fd0260eb9eede868ef08fedbc9898eafae0693e4988fba082c1d336e",
+      "programId": "prog-biz"
     },
     {
       "id": "u-lecturer-1",
@@ -37,7 +51,8 @@
       "program": "School of ICT",
       "avatar": "NB",
       "createdAt": "2025-09-01T08:00:00.000Z",
-      "passwordHash": "scrypt$985b647e564c544264ebfd61db39db0a$10c6e045127fd6067e46929c6ffe414f5049f99683dd571027303a531a423a44683d14703aa48cdcfe12d7bacbbece377dbdc1bd1a5833b578621061a6db3864"
+      "passwordHash": "scrypt$985b647e564c544264ebfd61db39db0a$10c6e045127fd6067e46929c6ffe414f5049f99683dd571027303a531a423a44683d14703aa48cdcfe12d7bacbbece377dbdc1bd1a5833b578621061a6db3864",
+      "programId": "prog-ict"
     },
     {
       "id": "u-admin-1",
@@ -47,7 +62,8 @@
       "program": "Academic Registry",
       "avatar": "SA",
       "createdAt": "2025-09-01T08:00:00.000Z",
-      "passwordHash": "scrypt$8902ef47713be042dd8662396a258cd1$883362fd3bd5d8d0bfc1e13bc3fa8dbdabce06a535987a248c1cc0a6b79e41bbae80e509a4de47668f62601fd8a446c2caa39b127476e8b888a9dcab27a68bf2"
+      "passwordHash": "scrypt$8902ef47713be042dd8662396a258cd1$883362fd3bd5d8d0bfc1e13bc3fa8dbdabce06a535987a248c1cc0a6b79e41bbae80e509a4de47668f62601fd8a446c2caa39b127476e8b888a9dcab27a68bf2",
+      "programId": null
     }
   ],
   "courses": [
@@ -62,7 +78,9 @@
       "schedule": "Mon and Wed, 09:00",
       "nextUp": "Week 4 - REST APIs Lab",
       "room": "Virtual Room A",
-      "enrolled": 42
+      "enrolled": 42,
+      "parentCourseId": null,
+      "programId": "prog-ict"
     },
     {
       "id": "course-db",
@@ -75,7 +93,9 @@
       "schedule": "Tue, 11:00",
       "nextUp": "Week 3 - Normalization",
       "room": "Virtual Room B",
-      "enrolled": 38
+      "enrolled": 38,
+      "parentCourseId": null,
+      "programId": "prog-ict"
     },
     {
       "id": "course-net",
@@ -88,7 +108,9 @@
       "schedule": "Thu, 14:00",
       "nextUp": "Week 3 - Routing Practical",
       "room": "Virtual Lab",
-      "enrolled": 45
+      "enrolled": 45,
+      "parentCourseId": null,
+      "programId": "prog-ict"
     },
     {
       "id": "course-fin",
@@ -101,7 +123,9 @@
       "schedule": "Fri, 10:00",
       "nextUp": "Week 3 - Ledgers and Trial Balance",
       "room": "Virtual Room C",
-      "enrolled": 31
+      "enrolled": 31,
+      "parentCourseId": null,
+      "programId": "prog-biz"
     }
   ],
   "classSessions": [
@@ -221,13 +245,74 @@
       "read": false
     }
   ],
-  "sessions": [],
+  "announcements": [
+    {
+      "id": "announce-1",
+      "type": "exam",
+      "title": "ICT 351 mid-semester exam",
+      "body": "Covers weeks 1 to 4. Bring your student card.",
+      "eventAt": "2026-08-10T09:00:00.000Z",
+      "audienceType": "program",
+      "programId": "prog-ict",
+      "courseId": null,
+      "authorId": "u-lecturer-1",
+      "createdAt": "2026-07-20T08:00:00.000Z"
+    },
+    {
+      "id": "announce-2",
+      "type": "announcement",
+      "title": "Semester registration deadline",
+      "body": "All students must confirm registration by the end of the month.",
+      "eventAt": "2026-08-31T17:00:00.000Z",
+      "audienceType": "all",
+      "programId": null,
+      "courseId": null,
+      "authorId": "u-admin-1",
+      "createdAt": "2026-07-18T08:00:00.000Z"
+    }
+  ],
+  "tutorials": [
+    {
+      "id": "tutorial-1",
+      "title": "REST API fundamentals",
+      "description": "A walkthrough of building a secure REST API from scratch.",
+      "videoUrl": "https://www.youtube.com/results?search_query=rest+api+fundamentals",
+      "programId": "prog-ict",
+      "authorId": "u-lecturer-1",
+      "createdAt": "2026-06-01T08:00:00.000Z"
+    }
+  ],
+  "materials": [],
+  "sessions": [
+    {
+      "token": "6e1149541651fcfe10d908d3ec9663a874e3291ddafcdcb6",
+      "userId": "u-admin-1",
+      "role": "admin",
+      "name": "System Administrator",
+      "email": "admin@vfu.local",
+      "createdAt": 1785280032388,
+      "expiresAt": 1785323232388
+    }
+  ],
   "analytics": {
     "activeStudents": 118,
     "attendanceRate": 86,
     "submissionRate": 74,
     "averageGrade": 79,
-    "weeklyEngagement": [64, 72, 68, 81, 77, 88, 84],
-    "courseCompletion": [72, 58, 64, 47]
+    "weeklyEngagement": [
+      64,
+      72,
+      68,
+      81,
+      77,
+      88,
+      84
+    ],
+    "courseCompletion": [
+      72,
+      58,
+      64,
+      47
+    ]
   }
 }
