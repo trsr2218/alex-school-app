@@ -420,7 +420,9 @@ let state = null, currentRoute = "dashboard", currentUser = null, query = "", au
 let localStream = null, screenStream = null;
 let sidebarCollapsed = localStorage.getItem(sidebarKey) === "collapsed";
 let roomSocket = null, roomSocketChannel = null;
+let roomSocketReconnectTimer = null, roomSocketIntentionalClose = false;
 let userSocket = null;
+let userSocketReconnectTimer = null, userSocketIntentionalClose = false;
 let myMessages = [];
 let openThreadUserId = null;
 const liveRoom = { sessionId: null, mic: true, camera: true, screen: false, hand: false, panel: "chat", messages: [], mediaError: "", sideHidden: false, boardStrokes: [] };
@@ -584,27 +586,67 @@ function stopMedia() {
 
 /* ============================== real-time room connection (chat/whiteboard/slides) ============================== */
 
+const WS_RECONNECT_MAX_ATTEMPTS = 10;
+const WS_RECONNECT_BASE_DELAY_MS = 1000;
+const WS_RECONNECT_MAX_DELAY_MS = 30000;
+
+function wsReconnectDelay(attempt) {
+  return Math.min(WS_RECONNECT_MAX_DELAY_MS, WS_RECONNECT_BASE_DELAY_MS * 2 ** attempt);
+}
+
 // Offline mode (file:// / no server) has nothing to connect to; the caller's own
 // local-only fallbacks (e.g. chatForm's local push) stay in effect when this no-ops.
-function connectRoomSocket(channelId) {
-  if (window.location.protocol === "file:" || typeof WebSocket === "undefined") return;
+// `attempt` is 0 for a fresh join and >0 for an automatic reconnect after a drop —
+// it drives both the backoff delay and whether a "reconnected" resync is needed.
+function connectRoomSocket(channelId, attempt = 0) {
+  if (window.location.protocol === "file:" || typeof WebSocket === "undefined" || !channelId) return;
   const session = readSession();
-  if (!session?.token || !channelId) return;
-  disconnectRoomSocket();
+  if (!session?.token) return;
+  if (roomSocketReconnectTimer) { clearTimeout(roomSocketReconnectTimer); roomSocketReconnectTimer = null; }
+  if (roomSocket) { try { roomSocket.close(); } catch { /* already closing/closed */ } }
+  roomSocketIntentionalClose = false;
   try {
     const wsProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const socket = new WebSocket(`${wsProtocol}//${window.location.host}/ws?token=${encodeURIComponent(session.token)}&channel=${encodeURIComponent(channelId)}`);
     roomSocket = socket;
     roomSocketChannel = channelId;
+    socket.onopen = () => {
+      if (attempt > 0) {
+        showToast("Reconnected to the room.");
+        // Board strokes replay via the server's own board-sync message on join;
+        // this just catches up on anything REST-backed (e.g. a presentation deck
+        // uploaded while disconnected) that the socket alone wouldn't carry.
+        loadState().catch(() => {});
+      }
+    };
     socket.onmessage = handleRoomSocketMessage;
-    socket.onclose = () => { if (roomSocket === socket) { roomSocket = null; roomSocketChannel = null; } };
-    socket.onerror = () => { if (roomSocket === socket) { roomSocket = null; roomSocketChannel = null; } };
+    socket.onclose = () => {
+      if (roomSocket !== socket) return; // superseded by a newer connection already
+      roomSocket = null;
+      if (roomSocketIntentionalClose) { roomSocketChannel = null; return; }
+      if (attempt === 0) showToast("Connection lost. Reconnecting…", "warning");
+      scheduleRoomSocketReconnect(channelId, attempt);
+    };
+    socket.onerror = () => { /* the close event that follows handles cleanup/reconnect */ };
   } catch (error) {
-    roomSocket = null; roomSocketChannel = null;
+    roomSocket = null;
+    scheduleRoomSocketReconnect(channelId, attempt);
   }
 }
 
+function scheduleRoomSocketReconnect(channelId, attempt) {
+  const nextAttempt = attempt + 1;
+  if (nextAttempt > WS_RECONNECT_MAX_ATTEMPTS) {
+    showToast("Couldn't reconnect to the room. Please rejoin manually.", "error");
+    roomSocketChannel = null;
+    return;
+  }
+  roomSocketReconnectTimer = setTimeout(() => connectRoomSocket(channelId, nextAttempt), wsReconnectDelay(attempt));
+}
+
 function disconnectRoomSocket() {
+  roomSocketIntentionalClose = true;
+  if (roomSocketReconnectTimer) { clearTimeout(roomSocketReconnectTimer); roomSocketReconnectTimer = null; }
   if (roomSocket) {
     try { roomSocket.close(); } catch { /* already closing/closed */ }
   }
@@ -677,24 +719,43 @@ async function navigateSlide(presentationId, index) {
 
 // Unlike the room socket (chat/board/slides, which have no REST layer at all), this
 // connection is purely a live-delivery optimization on top of POST/GET /api/messages —
-// correctness never depends on it being open.
-function connectUserSocket() {
+// correctness never depends on it being open, so reconnects stay quiet (no toasts).
+function connectUserSocket(attempt = 0) {
   if (window.location.protocol === "file:" || typeof WebSocket === "undefined" || userSocket) return;
   const session = readSession();
   if (!session?.token) return;
+  if (userSocketReconnectTimer) { clearTimeout(userSocketReconnectTimer); userSocketReconnectTimer = null; }
+  userSocketIntentionalClose = false;
   try {
     const wsProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const socket = new WebSocket(`${wsProtocol}//${window.location.host}/ws?token=${encodeURIComponent(session.token)}`);
     userSocket = socket;
+    socket.onopen = () => {
+      if (attempt > 0) loadMessages().then(render).catch(() => {});
+    };
     socket.onmessage = handleUserSocketMessage;
-    socket.onclose = () => { if (userSocket === socket) userSocket = null; };
-    socket.onerror = () => { if (userSocket === socket) userSocket = null; };
+    socket.onclose = () => {
+      if (userSocket !== socket) return;
+      userSocket = null;
+      if (userSocketIntentionalClose) return;
+      scheduleUserSocketReconnect(attempt);
+    };
+    socket.onerror = () => { /* the close event that follows handles cleanup/reconnect */ };
   } catch (error) {
     userSocket = null;
+    scheduleUserSocketReconnect(attempt);
   }
 }
 
+function scheduleUserSocketReconnect(attempt) {
+  const nextAttempt = attempt + 1;
+  if (nextAttempt > WS_RECONNECT_MAX_ATTEMPTS) return; // messaging still works via REST; fail quietly
+  userSocketReconnectTimer = setTimeout(() => connectUserSocket(nextAttempt), wsReconnectDelay(attempt));
+}
+
 function disconnectUserSocket() {
+  userSocketIntentionalClose = true;
+  if (userSocketReconnectTimer) { clearTimeout(userSocketReconnectTimer); userSocketReconnectTimer = null; }
   if (userSocket) {
     try { userSocket.close(); } catch { /* already closing/closed */ }
   }
