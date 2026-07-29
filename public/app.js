@@ -1,4 +1,9 @@
 
+// Shared with the WS reconnect logic further down (connectRoomSocket/connectUserSocket):
+// null = not yet determined, true = real server confirmed, false = no backend at all
+// (file:// or a static host with no /api/* handler) — WS shouldn't retry in that case.
+let backendAvailable = window.location.protocol === "file:" ? false : null;
+
 (() => {
   const originalFetch = window.fetch.bind(window);
   const storageKey = "vfu-offline-state";
@@ -371,7 +376,6 @@
   // It engages when there is no JSON backend to talk to: opened as a file:// page, or
   // hosted statically (e.g. Vercel) where /api/* is not answered by our Node server.
   // Served mode (npm start / Render) hits the real server and this shim stays out of the way.
-  let backendAvailable = window.location.protocol === "file:" ? false : null;
 
   window.fetch = async (resource, options = {}) => {
     const path = String(resource);
@@ -599,7 +603,7 @@ function wsReconnectDelay(attempt) {
 // `attempt` is 0 for a fresh join and >0 for an automatic reconnect after a drop —
 // it drives both the backoff delay and whether a "reconnected" resync is needed.
 function connectRoomSocket(channelId, attempt = 0) {
-  if (window.location.protocol === "file:" || typeof WebSocket === "undefined" || !channelId) return;
+  if (backendAvailable === false || typeof WebSocket === "undefined" || !channelId) return;
   const session = readSession();
   if (!session?.token) return;
   if (roomSocketReconnectTimer) { clearTimeout(roomSocketReconnectTimer); roomSocketReconnectTimer = null; }
@@ -721,7 +725,7 @@ async function navigateSlide(presentationId, index) {
 // connection is purely a live-delivery optimization on top of POST/GET /api/messages —
 // correctness never depends on it being open, so reconnects stay quiet (no toasts).
 function connectUserSocket(attempt = 0) {
-  if (window.location.protocol === "file:" || typeof WebSocket === "undefined" || userSocket) return;
+  if (backendAvailable === false || typeof WebSocket === "undefined" || userSocket) return;
   const session = readSession();
   if (!session?.token) return;
   if (userSocketReconnectTimer) { clearTimeout(userSocketReconnectTimer); userSocketReconnectTimer = null; }
@@ -1545,6 +1549,7 @@ async function joinLiveSession(sessionId, studentNumber) {
     liveRoom.hand = false;
     liveRoom.sideHidden = false;
     connectRoomSocket(sessionId);
+    render();
     await startLocalMedia();
     await loadState();
     showToast(currentRole() === "student" ? "You joined the class. Attendance marked present." : "You are in the live class.");
@@ -1562,6 +1567,7 @@ async function beginScheduledSession(sessionId) {
     liveRoom.hand = false;
     liveRoom.sideHidden = false;
     connectRoomSocket(response.session.id);
+    render();
     await startLocalMedia();
     await loadState();
     showToast("Scheduled class started. Students can now join.");
@@ -1725,6 +1731,7 @@ async function joinStudy(roomId, studentNumber) {
     studyState.boardStrokes = [];
     liveRoom.sideHidden = false;
     connectRoomSocket(roomId);
+    render();
     await startLocalMedia();
     await loadState();
     showToast("You joined the study room.");
