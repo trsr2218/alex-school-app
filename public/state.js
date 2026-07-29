@@ -271,6 +271,8 @@ window.VFU_SEED_STATE = {
     }
   ],
   "materials": [],
+  "presentations": [],
+  "messages": [],
   "analytics": {
     "activeStudents": 118,
     "attendanceRate": 86,

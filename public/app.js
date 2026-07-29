@@ -258,6 +258,67 @@
       data.materials.push(material); saveState(data);
       return jsonResponse({ material, materials: data.materials }, 201);
     }
+    if (method === "POST" && path === "/api/presentations") {
+      const requester = data.users.find((item) => item.id === body.actingUserId);
+      if (!requester || (requester.role !== "lecturer" && requester.role !== "admin")) return jsonResponse({ error: "You do not have permission to perform this action." }, 403);
+      const title = String(body.title || "").trim();
+      const slidesInput = Array.isArray(body.slides) ? body.slides : [];
+      if (!title) return jsonResponse({ error: "Title is required." }, 400);
+      if (!slidesInput.length) return jsonResponse({ error: "At least one slide is required." }, 400);
+      if (slidesInput.length > 40) return jsonResponse({ error: "A presentation can have at most 40 slides." }, 400);
+      const slides = [];
+      for (let index = 0; index < slidesInput.length; index++) {
+        const dataUrl = slidesInput[index] && typeof slidesInput[index].dataUrl === "string" && slidesInput[index].dataUrl.startsWith("data:") ? slidesInput[index].dataUrl : null;
+        if (!dataUrl) return jsonResponse({ error: `Slide ${index + 1} is missing a valid image.` }, 400);
+        slides.push({ id: `slide-${Date.now()}-${index}`, dataUrl, order: index });
+      }
+      const presentation = { id: `presentation-${Date.now()}`, sessionId: body.sessionId || null, courseId: body.courseId || null, title, slides, currentIndex: 0, hostId: requester.id, createdAt: new Date().toISOString() };
+      data.presentations.push(presentation); saveState(data);
+      return jsonResponse({ presentation, presentations: data.presentations }, 201);
+    }
+    if (method === "PATCH" && /^\/api\/presentations\/[\w-]+$/.test(path)) {
+      const requester = data.users.find((item) => item.id === body.actingUserId);
+      const presentation = data.presentations.find((item) => item.id === path.split("/").pop());
+      if (!presentation) return jsonResponse({ error: "Presentation was not found." }, 404);
+      if (!requester || (presentation.hostId !== requester.id && requester.role !== "admin")) return jsonResponse({ error: "Only the presentation's host can update it." }, 403);
+      if (body.currentIndex !== undefined) {
+        const index = Number(body.currentIndex);
+        if (!Number.isInteger(index) || index < 0 || index >= presentation.slides.length) return jsonResponse({ error: "Slide index is out of range." }, 400);
+        presentation.currentIndex = index;
+      }
+      saveState(data);
+      return jsonResponse({ presentation, presentations: data.presentations });
+    }
+    if (method === "POST" && path === "/api/messages") {
+      const sender = data.users.find((item) => item.id === body.senderId);
+      if (!sender) return jsonResponse({ error: "You can only send messages as yourself." }, 403);
+      const recipientId = String(body.recipientId || "");
+      const text = String(body.text || "").trim();
+      if (!recipientId || !data.users.some((item) => item.id === recipientId)) return jsonResponse({ error: "Recipient was not found." }, 400);
+      if (recipientId === sender.id) return jsonResponse({ error: "You cannot message yourself." }, 400);
+      if (!text) return jsonResponse({ error: "Message text is required." }, 400);
+      const message = { id: `msg-${Date.now()}`, senderId: sender.id, recipientId, text, createdAt: new Date().toISOString(), read: false };
+      data.messages.push(message); saveState(data);
+      return jsonResponse({ message }, 201);
+    }
+    if (method === "GET" && path.split("?")[0] === "/api/messages") {
+      // A GET has no request body, so identity travels via query string here only
+      // (served mode ignores this param entirely and authenticates via the Bearer header).
+      const query = new URLSearchParams(path.split("?")[1] || "");
+      const requester = data.users.find((item) => item.id === query.get("actingUserId"));
+      if (!requester) return jsonResponse({ error: "Sign in required." }, 401);
+      const mine = data.messages.filter((item) => item.senderId === requester.id || item.recipientId === requester.id);
+      return jsonResponse({ messages: mine });
+    }
+    if (method === "PATCH" && /^\/api\/messages\/[\w-]+$/.test(path)) {
+      const requester = data.users.find((item) => item.id === body.actingUserId);
+      const message = data.messages.find((item) => item.id === path.split("/").pop());
+      if (!message) return jsonResponse({ error: "Message was not found." }, 404);
+      if (!requester || message.recipientId !== requester.id) return jsonResponse({ error: "Only the recipient can update this message." }, 403);
+      if (body.read !== undefined) message.read = Boolean(body.read);
+      saveState(data);
+      return jsonResponse({ message });
+    }
     if (method === "POST" && path === "/api/admin/users") {
       const requester = data.users.find((item) => item.id === body.actingUserId);
       if (!requester || requester.role !== "admin") return jsonResponse({ error: "You do not have permission to perform this action." }, 403);
@@ -344,8 +405,8 @@ const routes = [
   { id: "assignments", label: "Assignments", icon: "file" }, { id: "discussions", label: "Group Study", icon: "messages" },
   { id: "announcements", label: "Calendar", icon: "calendar" }, { id: "tutorials", label: "Tutorials", icon: "video" },
   { id: "library", label: "Library", icon: "folder" }, { id: "analytics", label: "Analytics", icon: "chart" },
-  { id: "programs", label: "Programs & Courses", icon: "book" }, { id: "admin", label: "Admin", icon: "settings" },
-  { id: "profile", label: "Profile", icon: "users" }
+  { id: "messages", label: "Messages", icon: "messages" }, { id: "programs", label: "Programs & Courses", icon: "book" },
+  { id: "admin", label: "Admin", icon: "settings" }, { id: "profile", label: "Profile", icon: "users" }
 ];
 // Routes absent from this map are visible to every signed-in role.
 const ROUTE_ACCESS = { admin: ["admin"], programs: ["admin", "lecturer"] };
@@ -358,13 +419,19 @@ const sidebarKey = "vfu-sidebar";
 let state = null, currentRoute = "dashboard", currentUser = null, query = "", authMode = "login", authRole = "student";
 let localStream = null, screenStream = null;
 let sidebarCollapsed = localStorage.getItem(sidebarKey) === "collapsed";
-const liveRoom = { sessionId: null, mic: true, camera: true, screen: false, hand: false, panel: "chat", messages: [], mediaError: "", sideHidden: false };
-const studyState = { roomId: null, messages: [] };
+let roomSocket = null, roomSocketChannel = null;
+let userSocket = null;
+let myMessages = [];
+let openThreadUserId = null;
+const liveRoom = { sessionId: null, mic: true, camera: true, screen: false, hand: false, panel: "chat", messages: [], mediaError: "", sideHidden: false, boardStrokes: [] };
+const studyState = { roomId: null, messages: [], boardStrokes: [] };
+let boardColor = "#2563eb", boardWidth = 3;
 const openAssignments = new Set();
 const openCourseRows = new Set();
 let editingUserId = null;
 const pendingFiles = {};
 let pendingMaterialFile = null;
+let pendingSlideFiles = [];
 
 /* ============================== dom + icons ============================== */
 
@@ -515,6 +582,163 @@ function stopMedia() {
   localStream = null; screenStream = null; liveRoom.screen = false;
 }
 
+/* ============================== real-time room connection (chat/whiteboard/slides) ============================== */
+
+// Offline mode (file:// / no server) has nothing to connect to; the caller's own
+// local-only fallbacks (e.g. chatForm's local push) stay in effect when this no-ops.
+function connectRoomSocket(channelId) {
+  if (window.location.protocol === "file:" || typeof WebSocket === "undefined") return;
+  const session = readSession();
+  if (!session?.token || !channelId) return;
+  disconnectRoomSocket();
+  try {
+    const wsProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const socket = new WebSocket(`${wsProtocol}//${window.location.host}/ws?token=${encodeURIComponent(session.token)}&channel=${encodeURIComponent(channelId)}`);
+    roomSocket = socket;
+    roomSocketChannel = channelId;
+    socket.onmessage = handleRoomSocketMessage;
+    socket.onclose = () => { if (roomSocket === socket) { roomSocket = null; roomSocketChannel = null; } };
+    socket.onerror = () => { if (roomSocket === socket) { roomSocket = null; roomSocketChannel = null; } };
+  } catch (error) {
+    roomSocket = null; roomSocketChannel = null;
+  }
+}
+
+function disconnectRoomSocket() {
+  if (roomSocket) {
+    try { roomSocket.close(); } catch { /* already closing/closed */ }
+  }
+  roomSocket = null;
+  roomSocketChannel = null;
+}
+
+function sendRoomSocketMessage(type, payload) {
+  if (!roomSocket || roomSocket.readyState !== WebSocket.OPEN || !roomSocketChannel) return false;
+  roomSocket.send(JSON.stringify({ type, channel: roomSocketChannel, payload }));
+  return true;
+}
+
+function handleRoomSocketMessage(event) {
+  let message;
+  try { message = JSON.parse(event.data); } catch { return; }
+  if (!message || typeof message !== "object") return;
+
+  const isStudyChannel = message.channel === studyState.roomId;
+
+  if (message.type === "chat") {
+    const bucket = isStudyChannel ? studyState.messages : liveRoom.messages;
+    bucket.push({ author: message.from?.name || "Guest", text: message.payload?.text || "" });
+    render();
+    return;
+  }
+
+  if (message.type === "board-sync") {
+    const target = isStudyChannel ? studyState : liveRoom;
+    target.boardStrokes = Array.isArray(message.payload?.strokes) ? message.payload.strokes : [];
+    render();
+    return;
+  }
+
+  if (message.type === "draw") {
+    const target = isStudyChannel ? studyState : liveRoom;
+    target.boardStrokes.push(message);
+    render();
+    return;
+  }
+
+  if (message.type === "clear") {
+    const target = isStudyChannel ? studyState : liveRoom;
+    target.boardStrokes = [];
+    render();
+    return;
+  }
+
+  if (message.type === "slide") {
+    const presentation = state.presentations.find((item) => item.id === message.payload?.presentationId);
+    if (presentation) presentation.currentIndex = message.payload.index;
+    render();
+    return;
+  }
+}
+
+async function navigateSlide(presentationId, index) {
+  if (sendRoomSocketMessage("slide", { presentationId, index })) return;
+  try {
+    const response = await api(`/api/presentations/${presentationId}`, { method: "PATCH", body: { currentIndex: index } });
+    const presentation = state.presentations.find((item) => item.id === presentationId);
+    if (presentation) presentation.currentIndex = response.presentation.currentIndex;
+    render();
+  } catch (error) {
+    showToast(error.message, "error");
+  }
+}
+
+/* ============================== messaging (persisted, WS is delivery-only) ============================== */
+
+// Unlike the room socket (chat/board/slides, which have no REST layer at all), this
+// connection is purely a live-delivery optimization on top of POST/GET /api/messages —
+// correctness never depends on it being open.
+function connectUserSocket() {
+  if (window.location.protocol === "file:" || typeof WebSocket === "undefined" || userSocket) return;
+  const session = readSession();
+  if (!session?.token) return;
+  try {
+    const wsProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const socket = new WebSocket(`${wsProtocol}//${window.location.host}/ws?token=${encodeURIComponent(session.token)}`);
+    userSocket = socket;
+    socket.onmessage = handleUserSocketMessage;
+    socket.onclose = () => { if (userSocket === socket) userSocket = null; };
+    socket.onerror = () => { if (userSocket === socket) userSocket = null; };
+  } catch (error) {
+    userSocket = null;
+  }
+}
+
+function disconnectUserSocket() {
+  if (userSocket) {
+    try { userSocket.close(); } catch { /* already closing/closed */ }
+  }
+  userSocket = null;
+}
+
+function handleUserSocketMessage(event) {
+  let message;
+  try { message = JSON.parse(event.data); } catch { return; }
+  if (message?.type === "message" && message.payload?.message) {
+    const incoming = message.payload.message;
+    if (!myMessages.some((item) => item.id === incoming.id)) {
+      myMessages.push(incoming);
+      if (currentRoute !== "messages" || openThreadUserId !== incoming.senderId) {
+        showToast(`New message from ${message.from?.name || "someone"}`);
+      }
+      render();
+    }
+  }
+}
+
+async function loadMessages() {
+  try {
+    // actingUserId is only consumed by the offline shim (a GET has no body to read
+    // identity from there); served mode authenticates via the Bearer header as usual.
+    const response = await api(`/api/messages?actingUserId=${encodeURIComponent(currentUser.id)}`);
+    myMessages = response.messages;
+  } catch {
+    myMessages = [];
+  }
+}
+
+async function sendDirectMessage(recipientId, text) {
+  const trimmed = String(text || "").trim();
+  if (!recipientId || !trimmed) return;
+  try {
+    const response = await api("/api/messages", { method: "POST", body: { recipientId, text: trimmed, senderId: currentUser.id } });
+    myMessages.push(response.message);
+    render();
+  } catch (error) {
+    showToast(error.message, "error");
+  }
+}
+
 async function toggleScreenShare() {
   if (screenStream) {
     screenStream.getTracks().forEach((track) => track.stop());
@@ -536,6 +760,91 @@ function afterRender() {
   if (screenVideo && screenStream) screenVideo.srcObject = screenStream;
   const chat = viewRoot.querySelector(".chat-stream");
   if (chat) chat.scrollTop = chat.scrollHeight;
+  setupBoardCanvas();
+}
+
+/* ============================== shared whiteboard ============================== */
+
+function currentBoardStrokes() {
+  return currentRoute === "discussions" ? studyState.boardStrokes : liveRoom.boardStrokes;
+}
+
+function drawStrokePath(ctx, canvas, points, color, width) {
+  if (!points || points.length < 2) return;
+  ctx.strokeStyle = color || "#2563eb";
+  ctx.lineWidth = width || 3;
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  ctx.beginPath();
+  points.forEach((point, index) => {
+    const x = point[0] * canvas.width;
+    const y = point[1] * canvas.height;
+    if (index === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+}
+
+function redrawBoard(canvas) {
+  const ctx = canvas.getContext("2d");
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  for (const stroke of currentBoardStrokes()) {
+    drawStrokePath(ctx, canvas, stroke.payload?.points, stroke.payload?.color, stroke.payload?.width);
+  }
+}
+
+function setupBoardCanvas() {
+  const canvas = document.getElementById("boardCanvas");
+  if (!canvas) return;
+  const rect = canvas.getBoundingClientRect();
+  canvas.width = Math.max(1, Math.round(rect.width));
+  canvas.height = Math.max(1, Math.round(rect.height));
+  const ctx = canvas.getContext("2d");
+  redrawBoard(canvas);
+
+  let drawing = false;
+  let points = [];
+
+  const toPoint = (event) => {
+    const bounds = canvas.getBoundingClientRect();
+    return [(event.clientX - bounds.left) / bounds.width, (event.clientY - bounds.top) / bounds.height];
+  };
+
+  const finishStroke = () => {
+    if (!drawing) return;
+    drawing = false;
+    if (points.length > 1) sendRoomSocketMessage("draw", { points, color: boardColor, width: boardWidth });
+    points = [];
+  };
+
+  canvas.addEventListener("pointerdown", (event) => {
+    drawing = true;
+    points = [toPoint(event)];
+    canvas.setPointerCapture(event.pointerId);
+  });
+  canvas.addEventListener("pointermove", (event) => {
+    if (!drawing) return;
+    const next = toPoint(event);
+    const prev = points[points.length - 1];
+    points.push(next);
+    ctx.strokeStyle = boardColor;
+    ctx.lineWidth = boardWidth;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.beginPath();
+    ctx.moveTo(prev[0] * canvas.width, prev[1] * canvas.height);
+    ctx.lineTo(next[0] * canvas.width, next[1] * canvas.height);
+    ctx.stroke();
+  });
+  canvas.addEventListener("pointerup", finishStroke);
+  canvas.addEventListener("pointercancel", finishStroke);
+}
+
+function undoLastOwnStroke() {
+  const strokes = currentBoardStrokes();
+  for (let i = strokes.length - 1; i >= 0; i--) {
+    if (strokes[i].from?.id === currentUser.id) { strokes.splice(i, 1); break; }
+  }
+  render();
 }
 
 /* ============================== auth view ============================== */
@@ -686,13 +995,64 @@ function renderJoinedRoom(session, course, isStudyRoom, roomMembers) {
     ${liveRoom.sideHidden ? "" : `<aside class="live-side panel">
       <div class="live-tabs">
         <button class="panel-tab ${liveRoom.panel === "chat" ? "active" : ""}" type="button" data-live-panel="chat">${icon("messages")} Chat</button>
+        <button class="panel-tab ${liveRoom.panel === "board" ? "active" : ""}" type="button" data-live-panel="board">${icon("layout")} Board</button>
+        ${!isStudyRoom ? `<button class="panel-tab ${liveRoom.panel === "slides" ? "active" : ""}" type="button" data-live-panel="slides">${icon("file")} Slides</button>` : ""}
         <button class="panel-tab ${liveRoom.panel === "people" ? "active" : ""}" type="button" data-live-panel="people">${icon("users")} Participants (${participants.length})</button>
       </div>
       ${liveRoom.panel === "people"
         ? `<div class="live-side-body"><div class="participant-list">${participants.map((user) => `<article>${renderAvatar(user)}<div><strong>${escapeHtml(user.name)}${user.id === currentUser.id ? " (You)" : ""}</strong><p>${escapeHtml(roleLabels[user.role] || user.role)}</p></div><span class="presence"></span></article>`).join("")}</div><p class="mini-note">Media runs on WebRTC device capture in your browser.</p></div>`
+        : liveRoom.panel === "board"
+        ? renderBoardPanel()
+        : liveRoom.panel === "slides" && !isStudyRoom
+        ? renderSlidesPanel(session, isHost)
         : `<div class="live-side-body"><div class="chat-stream">${messages.length ? messages.map((message) => `<article class="chat-message"><strong>${escapeHtml(message.author)}</strong><p>${escapeHtml(message.text)}</p></article>`).join("") : `<p class="mini-note">No messages yet. Say hello to the room.</p>`}</div><form class="compose inline" id="chatForm"><input name="message" placeholder="Message the room" autocomplete="off"><button class="action primary" type="submit" title="Send message">${icon("send")}</button></form></div>`}
     </aside>`}
   </section>`;
+}
+
+function renderSlidesPanel(session, isHost) {
+  const presentation = state.presentations.filter((item) => item.sessionId === session.id).slice(-1)[0];
+
+  if (!presentation) {
+    if (!isHost) return `<div class="live-side-body"><p class="mini-note">The lecturer hasn't uploaded slides yet.</p></div>`;
+    return `<div class="live-side-body"><form class="form-grid" id="presentationForm">
+      <label>Title<input name="title" placeholder="Week 4 slides" required></label>
+      <div class="file-row">${icon("upload")}<input type="file" id="slideFilesInput" accept="image/*" multiple><span id="slideFilesStatus">Choose slide images (max 40, ~600KB each)</span></div>
+      <button class="action primary" type="submit">${icon("upload")} Upload deck</button>
+    </form></div>`;
+  }
+
+  const slide = presentation.slides[presentation.currentIndex];
+  const controls = isHost
+    ? `<div class="board-toolbar">
+        <button class="action" type="button" data-slide-nav="prev" data-slide-presentation="${escapeHtml(presentation.id)}" ${presentation.currentIndex === 0 ? "disabled" : ""}>Prev</button>
+        <span class="mini-note">Slide ${presentation.currentIndex + 1} / ${presentation.slides.length}</span>
+        <button class="action" type="button" data-slide-nav="next" data-slide-presentation="${escapeHtml(presentation.id)}" ${presentation.currentIndex === presentation.slides.length - 1 ? "disabled" : ""}>Next</button>
+      </div>`
+    : `<p class="mini-note">Slide ${presentation.currentIndex + 1} of ${presentation.slides.length}</p>`;
+
+  return `<div class="live-side-body board-body">${controls}<img class="slide-image" src="${slide?.dataUrl || ""}" alt="Slide ${presentation.currentIndex + 1}"></div>`;
+}
+
+const BOARD_COLORS = ["#2563eb", "#dc2626", "#16a34a", "#f59e0b", "#111827"];
+
+function renderBoardPanel() {
+  if (!roomSocket) {
+    return `<div class="live-side-body"><p class="mini-note">Real-time board requires a server connection. The whiteboard is unavailable in offline mode.</p></div>`;
+  }
+  return `<div class="live-side-body board-body">
+    <div class="board-toolbar">
+      <div class="board-colors">${BOARD_COLORS.map((color) => `<button type="button" class="board-color ${boardColor === color ? "active" : ""}" style="background:${color}" data-board-color="${color}" title="${color}" aria-label="Pen color ${color}"></button>`).join("")}</div>
+      <select id="boardWidthSelect">
+        <option value="2" ${boardWidth === 2 ? "selected" : ""}>Thin</option>
+        <option value="4" ${boardWidth === 4 ? "selected" : ""}>Medium</option>
+        <option value="8" ${boardWidth === 8 ? "selected" : ""}>Thick</option>
+      </select>
+      <button type="button" class="action" data-board-undo>Undo</button>
+      <button type="button" class="action danger" data-board-clear>Clear</button>
+    </div>
+    <canvas id="boardCanvas" class="board-canvas"></canvas>
+  </div>`;
 }
 
 const initialsOf = (name) => String(name || "VU").split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0].toUpperCase()).join("") || "VU";
@@ -885,6 +1245,41 @@ function renderLibrary() {
   return `${creator}<section class="panel"><div class="section-head"><h2>Materials Library</h2><span class="status-pill">${materials.length} files</span></div>${list}</section>`;
 }
 
+/* ============================== messages ============================== */
+
+function renderMessages() {
+  const threadsByUser = new Map();
+  for (const message of myMessages) {
+    const otherId = message.senderId === currentUser.id ? message.recipientId : message.senderId;
+    const existing = threadsByUser.get(otherId);
+    if (!existing || new Date(message.createdAt) > new Date(existing.createdAt)) threadsByUser.set(otherId, message);
+  }
+  const threads = Array.from(threadsByUser.entries())
+    .map(([userId, lastMessage]) => ({
+      user: userById(userId),
+      lastMessage,
+      unread: myMessages.filter((item) => item.recipientId === currentUser.id && item.senderId === userId && !item.read).length
+    }))
+    .filter((thread) => thread.user)
+    .sort((a, b) => new Date(b.lastMessage.createdAt) - new Date(a.lastMessage.createdAt));
+
+  const otherUsers = state.users.filter((user) => user.id !== currentUser.id);
+
+  const list = `<section class="panel"><div class="section-head"><h2>Messages</h2></div>
+    <form class="form-grid cols-2" id="newThreadForm"><label>To<select name="recipientId">${otherUsers.map((user) => `<option value="${escapeHtml(user.id)}">${escapeHtml(user.name)} (${escapeHtml(roleLabels[user.role] || user.role)})</option>`).join("")}</select></label><label>Message<input name="text" required placeholder="Type a message"></label><button class="action primary" type="submit" style="grid-column: 1 / -1;">${icon("send")} Send</button></form>
+    <div class="assignment-list">${threads.length ? threads.map((thread) => `<button class="assignment-row thread-row ${openThreadUserId === thread.user.id ? "active" : ""}" type="button" data-open-thread="${escapeHtml(thread.user.id)}"><span>${renderAvatar(thread.user)}<strong>${escapeHtml(thread.user.name)}</strong><small>${escapeHtml(thread.lastMessage.text)}</small></span>${thread.unread ? `<span class="status-pill">${thread.unread}</span>` : ""}</button>`).join("") : emptyState("No messages yet", "Start a conversation above.")}</div>
+  </section>`;
+
+  const threadUser = openThreadUserId ? userById(openThreadUserId) : null;
+  const threadMessages = threadUser
+    ? myMessages.filter((message) => (message.senderId === currentUser.id && message.recipientId === threadUser.id) || (message.senderId === threadUser.id && message.recipientId === currentUser.id)).sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt))
+    : [];
+
+  const thread = threadUser ? `<section class="panel"><div class="section-head"><h2>${escapeHtml(threadUser.name)}</h2></div><div class="chat-stream">${threadMessages.length ? threadMessages.map((message) => `<article class="chat-message"><strong>${escapeHtml(message.senderId === currentUser.id ? "You" : threadUser.name)}</strong><p>${escapeHtml(message.text)}</p></article>`).join("") : `<p class="mini-note">No messages yet.</p>`}</div><form class="compose inline" id="threadReplyForm" data-thread-user="${escapeHtml(threadUser.id)}"><input name="text" placeholder="Reply..." autocomplete="off"><button class="action primary" type="submit" title="Send message">${icon("send")}</button></form></section>` : "";
+
+  return `<div class="courses-layout">${list}${thread}</div>`;
+}
+
 /* ============================== analytics ============================== */
 
 function renderAnalytics() {
@@ -1003,7 +1398,8 @@ function renderShell() {
     sidebarToggleSlot.innerHTML = currentUser ? `<button class="icon-button" type="button" data-sidebar-toggle title="${sidebarCollapsed ? "Show sidebar" : "Hide sidebar"}" aria-expanded="${!sidebarCollapsed}">${icon("menu")}</button>` : "";
   }
   termLabel.textContent = state?.institution?.term || "VFU";
-  navList.innerHTML = visibleRoutes().map((route) => `<button class="nav-item ${route.id === currentRoute ? "active" : ""}" type="button" data-route="${route.id}">${icon(route.icon)}<span>${route.label}</span></button>`).join("");
+  const unreadMessageCount = currentUser ? myMessages.filter((item) => item.recipientId === currentUser.id && !item.read).length : 0;
+  navList.innerHTML = visibleRoutes().map((route) => `<button class="nav-item ${route.id === currentRoute ? "active" : ""}" type="button" data-route="${route.id}">${icon(route.icon)}<span>${route.label}</span>${route.id === "messages" && unreadMessageCount ? `<span class="status-pill">${unreadMessageCount}</span>` : ""}</button>`).join("");
   if (sessionPanel) {
     sessionPanel.innerHTML = !currentUser
       ? `<p class="session-hint">Sign in or create a student account.</p>`
@@ -1028,7 +1424,7 @@ function render() {
     dashboard: renderDashboard, courses: renderCourses, classroom: renderClassroom,
     attendance: renderAttendance, assignments: renderAssignments, discussions: renderDiscussions,
     analytics: renderAnalytics, admin: renderAdmin, programs: renderPrograms, profile: renderProfile,
-    announcements: renderAnnouncements, tutorials: renderTutorials, library: renderLibrary
+    announcements: renderAnnouncements, tutorials: renderTutorials, library: renderLibrary, messages: renderMessages
   };
   viewRoot.innerHTML = (viewMap[currentRoute] || viewMap.dashboard)();
   afterRender();
@@ -1044,6 +1440,10 @@ async function loadState() {
   state = await api("/api/state");
   const session = readSession();
   if (session?.user?.id) currentUser = state.users.find((user) => user.id === session.user.id) || session.user;
+  if (currentUser) {
+    connectUserSocket();
+    await loadMessages();
+  }
   render();
 }
 
@@ -1080,8 +1480,10 @@ async function joinLiveSession(sessionId, studentNumber) {
     await api("/api/sessions/join", { method: "POST", body: { sessionId, userId: currentUser.id, studentNumber } });
     liveRoom.sessionId = sessionId;
     liveRoom.messages = [];
+    liveRoom.boardStrokes = [];
     liveRoom.hand = false;
     liveRoom.sideHidden = false;
+    connectRoomSocket(sessionId);
     await startLocalMedia();
     await loadState();
     showToast(currentRole() === "student" ? "You joined the class. Attendance marked present." : "You are in the live class.");
@@ -1095,8 +1497,10 @@ async function beginScheduledSession(sessionId) {
     const response = await api("/api/sessions/begin", { method: "POST", body: { sessionId, userId: currentUser.id } });
     liveRoom.sessionId = response.session.id;
     liveRoom.messages = [];
+    liveRoom.boardStrokes = [];
     liveRoom.hand = false;
     liveRoom.sideHidden = false;
+    connectRoomSocket(response.session.id);
     await startLocalMedia();
     await loadState();
     showToast("Scheduled class started. Students can now join.");
@@ -1109,6 +1513,7 @@ async function endLiveSession(sessionId) {
   try {
     await api("/api/sessions/end", { method: "POST", body: { sessionId, userId: currentUser.id } });
     stopMedia();
+    disconnectRoomSocket();
     liveRoom.sessionId = null;
     await loadState();
     showToast("Class ended. Students who never joined were marked absent.");
@@ -1119,6 +1524,7 @@ async function endLiveSession(sessionId) {
 
 function leaveLiveSession() {
   stopMedia();
+  disconnectRoomSocket();
   liveRoom.sessionId = null;
   liveRoom.hand = false;
   render();
@@ -1206,6 +1612,38 @@ function handleMaterialFileSelected(input) {
   reader.readAsDataURL(file);
 }
 
+function handleSlideFilesSelected(input) {
+  const files = Array.from(input.files || []);
+  const status = document.getElementById("slideFilesStatus");
+  if (!files.length) { pendingSlideFiles = []; if (status) status.textContent = "Choose slide images (max 40, ~600KB each)"; return; }
+  if (files.length > 40) {
+    input.value = "";
+    pendingSlideFiles = [];
+    if (status) status.textContent = "Too many slides (max 40).";
+    showToast("A presentation can have at most 40 slides.", "warning");
+    return;
+  }
+  const oversized = files.find((file) => file.size > 600 * 1024);
+  if (oversized) {
+    input.value = "";
+    pendingSlideFiles = [];
+    if (status) status.textContent = `${oversized.name} is too large. Keep each slide under 600 KB.`;
+    showToast("Each slide must be under 600 KB.", "warning");
+    return;
+  }
+  pendingSlideFiles = new Array(files.length);
+  let loaded = 0;
+  files.forEach((file, index) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      pendingSlideFiles[index] = { name: file.name, type: file.type, size: file.size, data: String(reader.result || "") };
+      loaded += 1;
+      if (loaded === files.length && status) status.textContent = `${files.length} slide${files.length === 1 ? "" : "s"} ready`;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
 async function handleDiscussionReply(discussionId) {
   const text = window.prompt("Write a reply to the discussion:", "");
   if (text === null || !text.trim()) return;
@@ -1223,7 +1661,9 @@ async function joinStudy(roomId, studentNumber) {
     await api("/api/studyrooms/join", { method: "POST", body: { roomId, userId: currentUser.id, studentNumber } });
     studyState.roomId = roomId;
     studyState.messages = [];
+    studyState.boardStrokes = [];
     liveRoom.sideHidden = false;
+    connectRoomSocket(roomId);
     await startLocalMedia();
     await loadState();
     showToast("You joined the study room.");
@@ -1234,6 +1674,7 @@ async function joinStudy(roomId, studentNumber) {
 
 function leaveStudy() {
   stopMedia();
+  disconnectRoomSocket();
   studyState.roomId = null;
   render();
   showToast("You left the study room.");
@@ -1243,6 +1684,7 @@ async function closeStudy(roomId) {
   try {
     await api("/api/studyrooms/close", { method: "POST", body: { roomId, userId: currentUser.id } });
     stopMedia();
+    disconnectRoomSocket();
     studyState.roomId = null;
     await loadState();
     showToast("Study room closed.");
@@ -1271,7 +1713,10 @@ function handleViewInteraction(event) {
   if (data.logout !== undefined && "logout" in data) {
     api("/api/logout", { method: "POST" }).catch(() => {});
     stopMedia();
+    disconnectRoomSocket();
+    disconnectUserSocket();
     liveRoom.sessionId = null; studyState.roomId = null;
+    myMessages = []; openThreadUserId = null;
     clearSession();
     currentUser = null;
     render();
@@ -1286,10 +1731,32 @@ function handleViewInteraction(event) {
   if (data.liveAction) return void handleLiveAction(data.liveAction);
   if ("liveSideToggle" in data) { liveRoom.sideHidden = !liveRoom.sideHidden; render(); return; }
   if (data.livePanel) { liveRoom.panel = data.livePanel; render(); return; }
+  if (data.boardColor) { boardColor = data.boardColor; render(); return; }
+  if ("boardUndo" in data) return undoLastOwnStroke();
+  if ("boardClear" in data) { sendRoomSocketMessage("clear", {}); return; }
+  if (data.slideNav) {
+    const presentation = state.presentations.find((item) => item.id === data.slidePresentation);
+    if (presentation) {
+      const nextIndex = presentation.currentIndex + (data.slideNav === "next" ? 1 : -1);
+      if (nextIndex >= 0 && nextIndex < presentation.slides.length) void navigateSlide(presentation.id, nextIndex);
+    }
+    return;
+  }
   if (data.studyJoin) return void joinStudy(data.studyJoin);
   if ("studyLeave" in data) return leaveStudy();
   if (data.studyClose) return void closeStudy(data.studyClose);
   if (data.viewDiscussion) return void handleDiscussionReply(data.viewDiscussion);
+
+  if (data.openThread) {
+    openThreadUserId = data.openThread;
+    const unread = myMessages.filter((item) => item.senderId === data.openThread && item.recipientId === currentUser.id && !item.read);
+    unread.forEach((item) => {
+      item.read = true;
+      api(`/api/messages/${item.id}`, { method: "PATCH", body: { read: true } }).catch(() => {});
+    });
+    render();
+    return;
+  }
 
   if (data.openAssignment) {
     if (openAssignments.has(data.openAssignment)) openAssignments.delete(data.openAssignment);
@@ -1406,7 +1873,9 @@ function registerAppEvents() {
         const response = await api("/api/sessions/start", { method: "POST", body: { ...payload, userId: currentUser.id } });
         liveRoom.sessionId = response.session.id;
         liveRoom.messages = [];
+        liveRoom.boardStrokes = [];
         liveRoom.sideHidden = false;
+        connectRoomSocket(response.session.id);
         await startLocalMedia();
         await loadState();
         showToast("Live class started. Students can now join.");
@@ -1480,6 +1949,37 @@ function registerAppEvents() {
       return;
     }
 
+    if (form.id === "presentationForm") {
+      event.preventDefault();
+      if (!pendingSlideFiles.length || pendingSlideFiles.some((file) => !file)) { showToast("Choose slide images first.", "warning"); return; }
+      const payload = Object.fromEntries(new FormData(form).entries());
+      try {
+        await api("/api/presentations", { method: "POST", body: { ...payload, sessionId: liveRoom.sessionId, slides: pendingSlideFiles.map((file) => ({ dataUrl: file.data })), actingUserId: currentUser.id } });
+        pendingSlideFiles = [];
+        form.reset();
+        await loadState();
+        showToast("Presentation ready. Use Prev/Next to present.");
+      } catch (error) { showToast(error.message, "error"); }
+      return;
+    }
+
+    if (form.id === "newThreadForm") {
+      event.preventDefault();
+      const payload = Object.fromEntries(new FormData(form).entries());
+      openThreadUserId = payload.recipientId;
+      await sendDirectMessage(payload.recipientId, payload.text);
+      form.reset();
+      return;
+    }
+
+    if (form.id === "threadReplyForm") {
+      event.preventDefault();
+      const text = String(new FormData(form).get("text") || "").trim();
+      await sendDirectMessage(form.dataset.threadUser, text);
+      form.reset();
+      return;
+    }
+
     if (form.id === "studyForm") {
       event.preventDefault();
       const payload = Object.fromEntries(new FormData(form).entries());
@@ -1487,6 +1987,8 @@ function registerAppEvents() {
         const response = await api("/api/studyrooms", { method: "POST", body: { ...payload, userId: currentUser.id } });
         studyState.roomId = response.room.id;
         studyState.messages = [];
+        studyState.boardStrokes = [];
+        connectRoomSocket(response.room.id);
         await startLocalMedia();
         await loadState();
         showToast("Study room is open. Classmates in your field can join.");
@@ -1504,8 +2006,13 @@ function registerAppEvents() {
       event.preventDefault();
       const text = String(new FormData(form).get("message") || "").trim();
       if (!text) return;
-      const bucket = currentRoute === "discussions" ? studyState.messages : liveRoom.messages;
-      bucket.push({ author: currentUser?.name || "Guest", text });
+      // When connected, the server echoes the chat message back to everyone in the
+      // channel including the sender, so it's not also pushed locally here. Offline
+      // mode (no roomSocket) falls back to the original local-only push.
+      if (!sendRoomSocketMessage("chat", { text })) {
+        const bucket = currentRoute === "discussions" ? studyState.messages : liveRoom.messages;
+        bucket.push({ author: currentUser?.name || "Guest", text });
+      }
       form.reset();
       render();
     }
@@ -1519,6 +2026,7 @@ function registerAppEvents() {
     if (event.target.matches("input[type='file'][data-file-for]")) handleFileSelected(event.target);
     if (event.target.id === "avatarInput") handleAvatarFileSelected(event.target);
     if (event.target.id === "materialFileInput") handleMaterialFileSelected(event.target);
+    if (event.target.id === "slideFilesInput") handleSlideFilesSelected(event.target);
 
     if (event.target.id === "announcementAudience") {
       const showProgram = event.target.value === "program";
@@ -1536,6 +2044,10 @@ function registerAppEvents() {
       if (programField) programField.style.display = showProgram ? "" : "none";
       if (courseField) courseField.style.display = showProgram ? "none" : "";
     }
+
+    if (event.target.id === "boardWidthSelect") {
+      boardWidth = Number(event.target.value) || 3;
+    }
   });
 
   notificationButton?.addEventListener("click", () => {
@@ -1543,7 +2055,7 @@ function registerAppEvents() {
     showToast(unread.length ? `${unread.length} new: ${unread.map((item) => item.title).join(" | ")}` : "You are all caught up.");
   });
 
-  window.addEventListener("beforeunload", stopMedia);
+  window.addEventListener("beforeunload", () => { stopMedia(); disconnectRoomSocket(); disconnectUserSocket(); });
 }
 
 /* ============================== init ============================== */

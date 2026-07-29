@@ -68,11 +68,12 @@ function issueSession(data, user) {
   return token;
 }
 
-function authenticate(req, data) {
-  const match = /^Bearer\s+(.+)$/i.exec(String(req.headers.authorization || "").trim());
-  if (!match) return null;
+// Shared by both auth transports: the Authorization header (regular REST calls)
+// and a token query-string param (WebSocket handshakes, which can't set headers).
+function resolveSessionToken(data, token) {
+  if (!token) return null;
   const now = Date.now();
-  const session = (data.sessions || []).find((item) => item.token === match[1] && item.expiresAt > now);
+  const session = (data.sessions || []).find((item) => item.token === token && item.expiresAt > now);
   if (!session) return null;
   // Role is re-resolved from the live user record (not the session snapshot) so an
   // admin-driven role change takes effect immediately, not after the token expires.
@@ -81,6 +82,12 @@ function authenticate(req, data) {
   const name = liveUser ? liveUser.name : session.name;
   const email = liveUser ? liveUser.email : session.email;
   return { user: { id: session.userId, role, name, email }, session };
+}
+
+function authenticate(req, data) {
+  const match = /^Bearer\s+(.+)$/i.exec(String(req.headers.authorization || "").trim());
+  if (!match) return null;
+  return resolveSessionToken(data, match[1]);
 }
 
 const STAFF_ROLES = ["lecturer", "admin"];
@@ -314,6 +321,8 @@ const defaultData = {
   announcements: [],
   tutorials: [],
   materials: [],
+  presentations: [],
+  messages: [],
   analytics: {
     activeStudents: 0,
     attendanceRate: 0,
@@ -372,6 +381,8 @@ function ensureDataShape(data) {
     announcements: Array.isArray(normalized.announcements) ? normalized.announcements : [],
     tutorials: Array.isArray(normalized.tutorials) ? normalized.tutorials : [],
     materials: Array.isArray(normalized.materials) ? normalized.materials : [],
+    presentations: Array.isArray(normalized.presentations) ? normalized.presentations : [],
+    messages: Array.isArray(normalized.messages) ? normalized.messages : [],
     sessions: Array.isArray(normalized.sessions) ? normalized.sessions : [],
     analytics: normalized.analytics && typeof normalized.analytics === "object" ? normalized.analytics : defaultData.analytics
   };
@@ -1010,6 +1021,7 @@ function endClassSession(res, data, body) {
   }
 
   writeData(data);
+  wsClearChannelBoard(session.id);
   sendJson(res, 200, { session, attendance: data.attendance, message: "Class ended. Missing students were marked absent." });
 }
 
@@ -1085,6 +1097,7 @@ function closeStudyRoom(res, data, body, authUser) {
 
   room.status = "Closed";
   writeData(data);
+  wsClearChannelBoard(room.id);
   sendJson(res, 200, { room, studyRooms: data.studyRooms });
 }
 
@@ -1113,6 +1126,61 @@ function addForumMessage(res, data, body) {
 
   writeData(data);
   sendJson(res, 200, { discussions: data.discussions, message: "Reply posted." });
+}
+
+// Simple 1:1 direct messaging, no group threads. Persisted (unlike live-room chat/board,
+// which are WS-only): REST is authoritative, the WS push in handleApi's /api/messages
+// route is purely a live-delivery optimization for a recipient with an open connection.
+function sendMessage(res, data, body, authUser) {
+  const recipientId = sanitizeText(body.recipientId);
+  const text = sanitizeText(body.text);
+
+  if (!recipientId || !data.users.some((user) => user.id === recipientId)) {
+    sendJson(res, 400, { error: "Recipient was not found." });
+    return;
+  }
+  if (recipientId === authUser.id) {
+    sendJson(res, 400, { error: "You cannot message yourself." });
+    return;
+  }
+  if (!text) {
+    sendJson(res, 400, { error: "Message text is required." });
+    return;
+  }
+
+  const message = {
+    id: `msg-${Date.now()}`,
+    senderId: authUser.id,
+    recipientId,
+    text,
+    createdAt: new Date().toISOString(),
+    read: false
+  };
+
+  data.messages.push(message);
+  writeData(data);
+  wsSendToUser(recipientId, { type: "message", payload: { message }, from: { id: authUser.id, name: authUser.name, role: authUser.role }, ts: Date.now() });
+  sendJson(res, 201, { message });
+}
+
+function listMyMessages(res, data, authUser) {
+  const mine = data.messages.filter((item) => item.senderId === authUser.id || item.recipientId === authUser.id);
+  sendJson(res, 200, { messages: mine });
+}
+
+function updateMessageReadState(res, data, messageId, body, authUser) {
+  const message = data.messages.find((item) => item.id === messageId);
+  if (!message) {
+    sendJson(res, 404, { error: "Message was not found." });
+    return;
+  }
+  if (message.recipientId !== authUser.id) {
+    sendJson(res, 403, { error: "Only the recipient can update this message." });
+    return;
+  }
+  if (body.read !== undefined) message.read = Boolean(body.read);
+  writeData(data);
+  sendJson(res, 200, { message });
 }
 
 const ANNOUNCEMENT_TYPES = ["period", "exam", "meeting", "campaign", "news", "announcement"];
@@ -1257,6 +1325,89 @@ function uploadMaterial(res, data, body, authUser) {
   sendJson(res, 201, { material, materials: data.materials });
 }
 
+const MAX_PRESENTATION_SLIDES = 40;
+
+function createPresentation(res, data, body, authUser) {
+  const title = sanitizeText(body.title);
+  const slidesInput = Array.isArray(body.slides) ? body.slides : [];
+
+  if (!title) {
+    sendJson(res, 400, { error: "Title is required." });
+    return;
+  }
+  if (!slidesInput.length) {
+    sendJson(res, 400, { error: "At least one slide is required." });
+    return;
+  }
+  if (slidesInput.length > MAX_PRESENTATION_SLIDES) {
+    sendJson(res, 400, { error: `A presentation can have at most ${MAX_PRESENTATION_SLIDES} slides.` });
+    return;
+  }
+
+  const slides = [];
+  for (const [index, slide] of slidesInput.entries()) {
+    const dataUrl = slide && typeof slide.dataUrl === "string" && slide.dataUrl.startsWith("data:") && slide.dataUrl.length <= 800_000
+      ? slide.dataUrl
+      : null;
+    if (!dataUrl) {
+      sendJson(res, 400, { error: `Slide ${index + 1} is missing a valid image (under ~600KB each).` });
+      return;
+    }
+    slides.push({ id: `slide-${Date.now()}-${index}`, dataUrl, order: index });
+  }
+
+  const sessionId = sanitizeText(body.sessionId) || null;
+  if (sessionId && !data.classSessions.some((item) => item.id === sessionId)) {
+    sendJson(res, 400, { error: "Class session was not found." });
+    return;
+  }
+  const courseId = sanitizeText(body.courseId) || null;
+  if (courseId && !data.courses.some((item) => item.id === courseId)) {
+    sendJson(res, 400, { error: "Course was not found." });
+    return;
+  }
+
+  const presentation = {
+    id: `presentation-${Date.now()}`,
+    sessionId,
+    courseId,
+    title,
+    slides,
+    currentIndex: 0,
+    hostId: authUser.id,
+    createdAt: new Date().toISOString()
+  };
+
+  data.presentations.push(presentation);
+  writeData(data);
+  sendJson(res, 201, { presentation, presentations: data.presentations });
+}
+
+function updatePresentation(res, data, presentationId, body, authUser) {
+  const presentation = data.presentations.find((item) => item.id === presentationId);
+  if (!presentation) {
+    sendJson(res, 404, { error: "Presentation was not found." });
+    return;
+  }
+  if (presentation.hostId !== authUser.id && authUser.role !== "admin") {
+    sendJson(res, 403, { error: "Only the presentation's host can update it." });
+    return;
+  }
+
+  if (body.currentIndex !== undefined) {
+    const index = Number(body.currentIndex);
+    if (!Number.isInteger(index) || index < 0 || index >= presentation.slides.length) {
+      sendJson(res, 400, { error: "Slide index is out of range." });
+      return;
+    }
+    presentation.currentIndex = index;
+  }
+  if (body.title !== undefined) presentation.title = sanitizeText(body.title);
+
+  writeData(data);
+  sendJson(res, 200, { presentation, presentations: data.presentations });
+}
+
 function createProgram(res, data, body) {
   const name = sanitizeText(body.name);
   const code = sanitizeText(body.code).toUpperCase();
@@ -1392,6 +1543,8 @@ async function handleApi(req, res) {
     const pathname = req.url.split("?")[0];
     const courseIdMatch = /^\/api\/courses\/([\w-]+)$/.exec(pathname);
     const userIdMatch = /^\/api\/users\/([\w-]+)$/.exec(pathname);
+    const presentationIdMatch = /^\/api\/presentations\/([\w-]+)$/.exec(pathname);
+    const messageIdMatch = /^\/api\/messages\/([\w-]+)$/.exec(pathname);
 
     if (req.method === "GET" && pathname === "/api/state") {
       sendJson(res, 200, publicState(data));
@@ -1495,6 +1648,42 @@ async function handleApi(req, res) {
       const auth = requireSession(req, res, data); if (!auth) return;
       if (!requireRole(auth, res, STAFF_ROLES)) return;
       uploadMaterial(res, data, body, auth.user);
+      return;
+    }
+
+    if (req.method === "POST" && pathname === "/api/presentations") {
+      const auth = requireSession(req, res, data); if (!auth) return;
+      if (!requireRole(auth, res, STAFF_ROLES)) return;
+      createPresentation(res, data, body, auth.user);
+      return;
+    }
+
+    if (req.method === "PATCH" && presentationIdMatch) {
+      const auth = requireSession(req, res, data); if (!auth) return;
+      if (!requireRole(auth, res, STAFF_ROLES)) return;
+      updatePresentation(res, data, presentationIdMatch[1], body, auth.user);
+      return;
+    }
+
+    if (req.method === "POST" && pathname === "/api/messages") {
+      const auth = requireSession(req, res, data); if (!auth) return;
+      if (auth.user.id !== body.senderId) {
+        sendJson(res, 403, { error: "You can only send messages as yourself." });
+        return;
+      }
+      sendMessage(res, data, body, auth.user);
+      return;
+    }
+
+    if (req.method === "GET" && pathname === "/api/messages") {
+      const auth = requireSession(req, res, data); if (!auth) return;
+      listMyMessages(res, data, auth.user);
+      return;
+    }
+
+    if (req.method === "PATCH" && messageIdMatch) {
+      const auth = requireSession(req, res, data); if (!auth) return;
+      updateMessageReadState(res, data, messageIdMatch[1], body, auth.user);
       return;
     }
 
@@ -1616,8 +1805,322 @@ function serveStatic(req, res) {
   });
 }
 
+/* ============================== websocket (hand-rolled RFC 6455) ============================== */
+// No new dependency: handshake uses crypto (already required above) for the accept-key
+// digest, framing is implemented directly over the raw net.Socket handed to us by
+// Node's 'upgrade' event. Text frames only (chat/whiteboard/presentation payloads all
+// fit in a single small JSON frame) — no fragmentation or binary-frame support.
+
+const WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+const WS_MAX_FRAME_BYTES = 64 * 1024;
+
+// channelId (a classSessions or studyRooms id) -> { members: Set<member>, strokes: [] }
+// member: { socket, userId, role, name }
+const wsChannels = new Map();
+// userId -> Set<socket>, populated for every open /ws connection regardless of channel,
+// used for message delivery pushes that aren't scoped to any live-room channel.
+const wsUserSockets = new Map();
+
+function wsEncodeFrame(payload, opcode = 0x1) {
+  const payloadBuffer = Buffer.isBuffer(payload) ? payload : Buffer.from(payload);
+  const length = payloadBuffer.length;
+  let header;
+  if (length < 126) {
+    header = Buffer.from([0x80 | opcode, length]);
+  } else if (length < 65536) {
+    header = Buffer.alloc(4);
+    header[0] = 0x80 | opcode;
+    header[1] = 126;
+    header.writeUInt16BE(length, 2);
+  } else {
+    header = Buffer.alloc(10);
+    header[0] = 0x80 | opcode;
+    header[1] = 127;
+    header.writeBigUInt64BE(BigInt(length), 2);
+  }
+  return Buffer.concat([header, payloadBuffer]);
+}
+
+function wsWrite(socket, buffer) {
+  if (socket.destroyed || socket.writableEnded) return;
+  try {
+    socket.write(buffer);
+  } catch (error) {
+    // The socket may close between the destroyed-check and the write; safe to ignore.
+  }
+}
+
+function wsSend(socket, message) {
+  wsWrite(socket, wsEncodeFrame(JSON.stringify(message)));
+}
+
+function wsBroadcast(channelId, message, exceptSocket) {
+  const channel = wsChannels.get(channelId);
+  if (!channel) return;
+  const frame = wsEncodeFrame(JSON.stringify(message));
+  for (const member of channel.members) {
+    if (member.socket === exceptSocket) continue;
+    wsWrite(member.socket, frame);
+  }
+}
+
+function wsSendToUser(userId, message) {
+  const sockets = wsUserSockets.get(userId);
+  if (!sockets) return;
+  const frame = wsEncodeFrame(JSON.stringify(message));
+  for (const socket of sockets) wsWrite(socket, frame);
+}
+
+function wsJoinChannel(channelId, member) {
+  let channel = wsChannels.get(channelId);
+  if (!channel) {
+    channel = { members: new Set(), strokes: [] };
+    wsChannels.set(channelId, channel);
+  }
+  channel.members.add(member);
+  return channel;
+}
+
+function wsLeaveChannel(channelId, member) {
+  const channel = wsChannels.get(channelId);
+  if (!channel) return;
+  channel.members.delete(member);
+  if (channel.members.size === 0) wsChannels.delete(channelId);
+}
+
+// Called from the REST end/close handlers below — a board is scoped to one
+// class/room's lifetime, not meant to persist into the next session.
+function wsClearChannelBoard(channelId) {
+  const channel = wsChannels.get(channelId);
+  if (channel) channel.strokes = [];
+}
+
+function wsRegisterUserSocket(userId, socket) {
+  let sockets = wsUserSockets.get(userId);
+  if (!sockets) {
+    sockets = new Set();
+    wsUserSockets.set(userId, sockets);
+  }
+  sockets.add(socket);
+}
+
+function wsUnregisterUserSocket(userId, socket) {
+  const sockets = wsUserSockets.get(userId);
+  if (!sockets) return;
+  sockets.delete(socket);
+  if (sockets.size === 0) wsUserSockets.delete(userId);
+}
+
+// Mirrors the field-scoping already used for REST joins (joinClassSession/joinStudyRoom):
+// a channel id is either a live class session or a study room, gated by canAccessCourse.
+function canJoinWsChannel(data, user, channelId) {
+  if (channelId.startsWith("session-")) {
+    const session = data.classSessions.find((item) => item.id === channelId);
+    if (!session) return false;
+    return canAccessCourse(user, data.courses.find((item) => item.id === session.courseId));
+  }
+  if (channelId.startsWith("room-")) {
+    const room = data.studyRooms.find((item) => item.id === channelId);
+    if (!room) return false;
+    return canAccessCourse(user, data.courses.find((item) => item.id === room.courseId));
+  }
+  return false;
+}
+
+// Parses as many complete frames as `buffer` currently holds; returns the frames found
+// plus whatever incomplete trailing bytes should be retained for the next 'data' event.
+function wsParseFrames(buffer) {
+  const frames = [];
+  let offset = 0;
+  while (true) {
+    if (buffer.length - offset < 2) break;
+    const byte0 = buffer[offset];
+    const byte1 = buffer[offset + 1];
+    const opcode = byte0 & 0x0f;
+    const masked = Boolean(byte1 & 0x80);
+    let length = byte1 & 0x7f;
+    let pos = offset + 2;
+
+    if (length === 126) {
+      if (buffer.length - pos < 2) break;
+      length = buffer.readUInt16BE(pos);
+      pos += 2;
+    } else if (length === 127) {
+      if (buffer.length - pos < 8) break;
+      length = Number(buffer.readBigUInt64BE(pos));
+      pos += 8;
+    }
+
+    if (length > WS_MAX_FRAME_BYTES) {
+      return { frames, remainder: Buffer.alloc(0), error: "too-large" };
+    }
+
+    let maskKey = null;
+    if (masked) {
+      if (buffer.length - pos < 4) break;
+      maskKey = buffer.subarray(pos, pos + 4);
+      pos += 4;
+    }
+
+    if (buffer.length - pos < length) break;
+    let payload = buffer.subarray(pos, pos + length);
+    if (masked) {
+      const unmasked = Buffer.alloc(length);
+      for (let i = 0; i < length; i++) unmasked[i] = payload[i] ^ maskKey[i % 4];
+      payload = unmasked;
+    }
+
+    frames.push({ opcode, payload });
+    offset = pos + length;
+  }
+  return { frames, remainder: buffer.subarray(offset), error: null };
+}
+
+// Dispatches one parsed client message. `channelId` is the channel the socket joined
+// at handshake time (null for connections opened only for message delivery).
+function handleWsMessage(user, channelId, message) {
+  const type = message && message.type;
+  const targetChannel = channelId || (typeof message?.channel === "string" ? message.channel : null);
+  if (!targetChannel || !type) return;
+
+  const envelope = {
+    type,
+    channel: targetChannel,
+    from: { id: user.id, name: user.name, role: user.role },
+    payload: message.payload && typeof message.payload === "object" ? message.payload : {},
+    ts: Date.now()
+  };
+
+  if (type === "chat") {
+    wsBroadcast(targetChannel, envelope);
+    return;
+  }
+
+  if (type === "draw" || type === "clear") {
+    const channel = wsChannels.get(targetChannel);
+    if (channel) {
+      if (type === "clear") channel.strokes = [];
+      else {
+        channel.strokes.push(envelope);
+        if (channel.strokes.length > 500) channel.strokes.shift();
+      }
+    }
+    wsBroadcast(targetChannel, envelope);
+    return;
+  }
+
+  if (type === "slide") {
+    const data = readData();
+    const presentation = data.presentations.find((item) => item.id === envelope.payload.presentationId);
+    if (!presentation || presentation.hostId !== user.id) return;
+    const index = Number(envelope.payload.index);
+    if (!Number.isInteger(index) || index < 0 || index >= presentation.slides.length) return;
+    presentation.currentIndex = index;
+    writeData(data);
+    wsBroadcast(targetChannel, envelope);
+  }
+}
+
+function handleUpgrade(req, socket) {
+  let requestUrl;
+  try {
+    requestUrl = new URL(req.url, `http://${req.headers.host || "localhost"}`);
+  } catch (error) {
+    socket.destroy();
+    return;
+  }
+
+  if (requestUrl.pathname !== "/ws") {
+    socket.destroy();
+    return;
+  }
+
+  const key = req.headers["sec-websocket-key"];
+  if (!key) {
+    socket.destroy();
+    return;
+  }
+
+  const data = readData();
+  const auth = resolveSessionToken(data, requestUrl.searchParams.get("token"));
+  if (!auth) {
+    socket.write("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n");
+    socket.destroy();
+    return;
+  }
+
+  const channelId = requestUrl.searchParams.get("channel") || null;
+  // auth.user only carries {id, role, name, email}; program-scoped access checks need
+  // the full record (programId), same lookup joinClassSession/joinStudyRoom already do.
+  const fullUser = data.users.find((item) => item.id === auth.user.id) || auth.user;
+  if (channelId && !canJoinWsChannel(data, fullUser, channelId)) {
+    socket.write("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n");
+    socket.destroy();
+    return;
+  }
+
+  const acceptKey = crypto.createHash("sha1").update(key + WS_GUID).digest("base64");
+  socket.write(
+    "HTTP/1.1 101 Switching Protocols\r\n" +
+    "Upgrade: websocket\r\n" +
+    "Connection: Upgrade\r\n" +
+    `Sec-WebSocket-Accept: ${acceptKey}\r\n\r\n`
+  );
+
+  const member = { socket, userId: auth.user.id, role: auth.user.role, name: auth.user.name };
+  wsRegisterUserSocket(auth.user.id, socket);
+  if (channelId) {
+    const channel = wsJoinChannel(channelId, member);
+    if (channel.strokes.length) {
+      wsSend(socket, { type: "board-sync", channel: channelId, payload: { strokes: channel.strokes } });
+    }
+  }
+
+  let buffered = Buffer.alloc(0);
+  let closed = false;
+  const cleanup = () => {
+    if (closed) return;
+    closed = true;
+    wsUnregisterUserSocket(auth.user.id, socket);
+    if (channelId) wsLeaveChannel(channelId, member);
+  };
+
+  socket.on("data", (chunk) => {
+    buffered = Buffer.concat([buffered, chunk]);
+    const { frames, remainder, error } = wsParseFrames(buffered);
+    buffered = remainder;
+    if (error === "too-large") {
+      socket.destroy();
+      return;
+    }
+
+    for (const frame of frames) {
+      if (frame.opcode === 0x8) {
+        socket.end();
+        return;
+      }
+      if (frame.opcode === 0x9) {
+        wsWrite(socket, wsEncodeFrame(frame.payload, 0xA));
+        continue;
+      }
+      if (frame.opcode !== 0x1) continue;
+
+      let message;
+      try {
+        message = JSON.parse(frame.payload.toString("utf8"));
+      } catch (error) {
+        continue;
+      }
+      handleWsMessage(auth.user, channelId, message);
+    }
+  });
+
+  socket.on("close", cleanup);
+  socket.on("error", cleanup);
+}
+
 function createServer() {
-  return http.createServer((req, res) => {
+  const server = http.createServer((req, res) => {
     applySecurityHeaders(res);
     const requestUrl = new URL(req.url, `http://${req.headers.host || "localhost"}`);
     if (requestUrl.pathname.startsWith("/api/")) {
@@ -1627,6 +2130,8 @@ function createServer() {
 
     serveStatic(req, res);
   });
+  server.on("upgrade", handleUpgrade);
+  return server;
 }
 
 function startServer(port = PORT) {

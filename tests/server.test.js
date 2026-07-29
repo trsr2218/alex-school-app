@@ -406,3 +406,158 @@ test('joining a live class with the wrong student number is rejected', async () 
     body: { sessionId }
   });
 });
+
+// Phase 2B tests below also reuse the shared server/tokens from Phase 1 (no fresh logins).
+
+test('WebSocket handshake rejects a connection with no token or an invalid token', async () => {
+  const attempt = (query) => new Promise((resolve) => {
+    const ws = new WebSocket(`ws://127.0.0.1:${phase1Port}/ws${query}`);
+    const finish = (outcome) => { try { ws.close(); } catch {} resolve(outcome); };
+    ws.addEventListener('open', () => finish('open'));
+    ws.addEventListener('error', () => finish('error'));
+  });
+
+  assert.equal(await attempt(''), 'error');
+  assert.equal(await attempt('?token=not-a-real-token'), 'error');
+});
+
+test('WebSocket handshake rejects joining a channel that does not exist', async () => {
+  // Reuses an already-issued token (no fresh login) since /api/login is rate-limited
+  // and this file's total login budget is already tight — see the comment above.
+  const outcome = await new Promise((resolve) => {
+    const ws = new WebSocket(`ws://127.0.0.1:${phase1Port}/ws?token=${phase1Tokens.student}&channel=session-does-not-exist`);
+    const finish = (result) => { try { ws.close(); } catch {} resolve(result); };
+    ws.addEventListener('open', () => finish('open'));
+    ws.addEventListener('error', () => finish('error'));
+  });
+  assert.equal(outcome, 'error');
+});
+
+test('a chat message sent by one WebSocket client is broadcast to a second client in the same channel', async () => {
+  const start = await requestJson(`http://127.0.0.1:${phase1Port}/api/sessions/start`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${phase1Tokens.lecturer}` },
+    body: { courseId: 'course-net', title: 'WS broadcast test' }
+  });
+  assert.equal(start.status, 201);
+  const sessionId = start.payload.session.id;
+
+  const wsA = new WebSocket(`ws://127.0.0.1:${phase1Port}/ws?token=${phase1Tokens.lecturer}&channel=${sessionId}`);
+  const wsB = new WebSocket(`ws://127.0.0.1:${phase1Port}/ws?token=${phase1Tokens.student}&channel=${sessionId}`);
+
+  await Promise.all([
+    new Promise((resolve, reject) => { wsA.addEventListener('open', resolve); wsA.addEventListener('error', reject); }),
+    new Promise((resolve, reject) => { wsB.addEventListener('open', resolve); wsB.addEventListener('error', reject); })
+  ]);
+
+  const received = new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('timed out waiting for broadcast')), 4000);
+    wsB.addEventListener('message', (event) => { clearTimeout(timer); resolve(JSON.parse(event.data)); });
+  });
+
+  wsA.send(JSON.stringify({ type: 'chat', channel: sessionId, payload: { text: 'hello room' } }));
+  const message = await received;
+
+  assert.equal(message.type, 'chat');
+  assert.equal(message.payload.text, 'hello room');
+  assert.equal(message.from.role, 'lecturer');
+
+  wsA.close(); wsB.close();
+  await requestJson(`http://127.0.0.1:${phase1Port}/api/sessions/end`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${phase1Tokens.lecturer}` },
+    body: { sessionId }
+  });
+});
+
+test('presentations: staff-only to create, host-only to update, slide index is validated', async () => {
+  const start = await requestJson(`http://127.0.0.1:${phase1Port}/api/sessions/start`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${phase1Tokens.lecturer}` },
+    body: { courseId: 'course-fin', title: 'Presentation test session' }
+  });
+  assert.equal(start.status, 201);
+  const sessionId = start.payload.session.id;
+  const slide = { dataUrl: `data:image/png;base64,${Buffer.from('slide').toString('base64')}` };
+
+  const studentAttempt = await requestJson(`http://127.0.0.1:${phase1Port}/api/presentations`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${phase1Tokens.student}` },
+    body: { title: 'Hack deck', sessionId, slides: [slide] }
+  });
+  assert.equal(studentAttempt.status, 403);
+
+  const created = await requestJson(`http://127.0.0.1:${phase1Port}/api/presentations`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${phase1Tokens.lecturer}` },
+    body: { title: 'Week 5 slides', sessionId, slides: [slide, slide] }
+  });
+  assert.equal(created.status, 201);
+  assert.equal(created.payload.presentation.slides.length, 2);
+  const presentationId = created.payload.presentation.id;
+
+  const outOfRange = await requestJson(`http://127.0.0.1:${phase1Port}/api/presentations/${presentationId}`, {
+    method: 'PATCH',
+    headers: { authorization: `Bearer ${phase1Tokens.lecturer}` },
+    body: { currentIndex: 5 }
+  });
+  assert.equal(outOfRange.status, 400);
+
+  const validUpdate = await requestJson(`http://127.0.0.1:${phase1Port}/api/presentations/${presentationId}`, {
+    method: 'PATCH',
+    headers: { authorization: `Bearer ${phase1Tokens.lecturer}` },
+    body: { currentIndex: 1 }
+  });
+  assert.equal(validUpdate.status, 200);
+  assert.equal(validUpdate.payload.presentation.currentIndex, 1);
+
+  await requestJson(`http://127.0.0.1:${phase1Port}/api/sessions/end`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${phase1Tokens.lecturer}` },
+    body: { sessionId }
+  });
+});
+
+test('messages: identity-checked sending, GET returns only the caller\'s own messages, only the recipient can mark read', async () => {
+  const spoofAttempt = await requestJson(`http://127.0.0.1:${phase1Port}/api/messages`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${phase1Tokens.student}` },
+    body: { senderId: 'u-lecturer-1', recipientId: 'u-student-1', text: 'spoofed' }
+  });
+  assert.equal(spoofAttempt.status, 403);
+
+  const sent = await requestJson(`http://127.0.0.1:${phase1Port}/api/messages`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${phase1Tokens.lecturer}` },
+    body: { senderId: 'u-lecturer-1', recipientId: 'u-student-1', text: 'Office hours moved to 3pm.' }
+  });
+  assert.equal(sent.status, 201);
+  const messageId = sent.payload.message.id;
+
+  const studentInbox = await requestJson(`http://127.0.0.1:${phase1Port}/api/messages`, {
+    headers: { authorization: `Bearer ${phase1Tokens.student}` }
+  });
+  assert.equal(studentInbox.status, 200);
+  assert.ok(studentInbox.payload.messages.some((item) => item.id === messageId));
+
+  const adminInbox = await requestJson(`http://127.0.0.1:${phase1Port}/api/messages`, {
+    headers: { authorization: `Bearer ${phase1Tokens.admin}` }
+  });
+  assert.equal(adminInbox.status, 200);
+  assert.ok(!adminInbox.payload.messages.some((item) => item.id === messageId));
+
+  const wrongReader = await requestJson(`http://127.0.0.1:${phase1Port}/api/messages/${messageId}`, {
+    method: 'PATCH',
+    headers: { authorization: `Bearer ${phase1Tokens.lecturer}` },
+    body: { read: true }
+  });
+  assert.equal(wrongReader.status, 403);
+
+  const markRead = await requestJson(`http://127.0.0.1:${phase1Port}/api/messages/${messageId}`, {
+    method: 'PATCH',
+    headers: { authorization: `Bearer ${phase1Tokens.student}` },
+    body: { read: true }
+  });
+  assert.equal(markRead.status, 200);
+  assert.equal(markRead.payload.message.read, true);
+});
