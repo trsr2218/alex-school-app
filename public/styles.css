@@ -247,7 +247,6 @@ h1, h2, h3, p { overflow-wrap: anywhere; }
 .topbar {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 18px;
   margin-bottom: 20px;
   padding: 14px 18px;
@@ -268,13 +267,18 @@ h1 { margin: 0; color: var(--ink); font-size: 26px; line-height: 1.1; }
   letter-spacing: 0.6px;
 }
 
+.topbar-title { min-width: 0; }
+.sidebar-toggle-slot:empty { display: none; }
 .topbar-actions { display: flex; align-items: center; gap: 10px; }
 
 .search {
   display: flex;
   align-items: center;
   gap: 8px;
-  min-width: 260px;
+  flex: 1 1 220px;
+  min-width: 0;
+  max-width: 430px;
+  margin-left: auto;
   padding: 0 12px;
   border: 1px solid var(--line-soft);
   border-radius: 11px;
@@ -392,7 +396,10 @@ h1 { margin: 0; color: var(--ink); font-size: 26px; line-height: 1.1; }
 
 /* ---------- generic view pieces ---------- */
 
-.view-root { display: grid; gap: 16px; }
+/* minmax(0, 1fr), not the implicit `auto`: an auto column is sized to its
+   widest child's max-content, which pushed wide panels (tables, metric rows)
+   past the screen edge and made the whole page scroll sideways on phones. */
+.view-root { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; }
 
 .panel {
   border: 1px solid var(--line);
@@ -615,7 +622,7 @@ h1 { margin: 0; color: var(--ink); font-size: 26px; line-height: 1.1; }
 
 .icon-dot svg { width: 15px; height: 15px; stroke: currentColor; stroke-width: 2; fill: none; stroke-linecap: round; stroke-linejoin: round; }
 
-.gauge-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; text-align: center; }
+.gauge-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; text-align: center; }
 .gauge-item { display: grid; gap: 4px; justify-items: center; }
 .gauge-item svg { width: 78px; height: 48px; }
 .gauge-item .gauge-track { stroke: var(--line-soft); }
@@ -1027,7 +1034,7 @@ html[data-theme="light"] .live-stage { background: #101725; }
 
 /* ---------- forms ---------- */
 
-.form-grid { display: grid; gap: 12px; }
+.form-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; }
 .form-grid.cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 
 .form-grid label, .auth-form label {
@@ -1040,6 +1047,8 @@ html[data-theme="light"] .live-stage { background: #101725; }
 }
 
 .form-grid input, .form-grid select, .form-grid textarea {
+  width: 100%;
+  min-width: 0;
   padding: 10px 12px;
   border: 1px solid var(--line-soft);
   border-radius: 10px;
@@ -1151,7 +1160,7 @@ body.auth-mode #viewRoot { width: 100%; min-height: 100vh; display: flex; align-
 .auth-visual h1 { margin: 0; color: #fff; font-size: 36px; line-height: 1.15; }
 .auth-visual p { margin: 0; color: rgba(255, 255, 255, 0.85); font-size: 15.5px; line-height: 1.6; }
 
-.auth-feature-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 11px; margin-top: 8px; }
+.auth-feature-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 11px; margin-top: 8px; }
 
 .auth-feature-grid span {
   display: flex;
@@ -1170,7 +1179,7 @@ body.auth-mode #viewRoot { width: 100%; min-height: 100vh; display: flex; align-
 
 .auth-tabs {
   display: grid;
-  grid-template-columns: repeat(2, 1fr);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
   padding: 4px;
   border-radius: 999px;
@@ -1204,6 +1213,9 @@ body.auth-mode #viewRoot { width: 100%; min-height: 100vh; display: flex; align-
 .auth-form label { color: #1f2937; font-size: 13px; font-weight: 600; display: flex; flex-direction: column; gap: 6px; }
 
 .auth-form input, .auth-form select {
+  width: 100%;
+  min-width: 0;
+  text-overflow: ellipsis;
   padding: 10px 12px;
   border: 1.5px solid #d9e2ec;
   border-radius: 10px;
@@ -1220,7 +1232,7 @@ body.auth-mode #viewRoot { width: 100%; min-height: 100vh; display: flex; align-
 
 .auth-form .action.primary { background: linear-gradient(135deg, #f97316 0%, #ea580c 100%); color: #fff; }
 
-.field-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; }
+.field-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 
 .auth-note {
   margin: 4px 0 0;
@@ -1230,6 +1242,90 @@ body.auth-mode #viewRoot { width: 100%; min-height: 100vh; display: flex; align-
   color: #9a3412;
   font-size: 12px;
   line-height: 1.5;
+}
+
+/* ---------- mobile drawer + bottom tab bar ---------- */
+
+/* These live in the markup at every width; the media queries below switch them on. */
+.drawer-scrim, .tabbar, .drawer-close, .drawer-theme { display: none; }
+
+.tabbar {
+  position: fixed;
+  z-index: 45;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  align-items: stretch;
+  justify-content: space-around;
+  gap: 2px;
+  padding: 6px 4px calc(6px + env(safe-area-inset-bottom));
+  border-top: 1px solid var(--line-soft);
+  background: var(--panel);
+  box-shadow: 0 -6px 20px rgba(0, 0, 0, 0.18);
+}
+
+.tab-item {
+  position: relative;
+  display: flex;
+  flex: 1 1 0;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  min-width: 44px;
+  min-height: 48px;
+  padding: 4px 2px;
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 10.5px;
+  font-weight: 700;
+  line-height: 1.1;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.tab-item svg { width: 21px; height: 21px; stroke: currentColor; stroke-width: 2; fill: none; stroke-linecap: round; stroke-linejoin: round; }
+.tab-item span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tab-item.active { color: var(--accent); background: var(--accent-soft); }
+.tab-item:active { transform: scale(0.96); }
+
+.tab-badge {
+  position: absolute;
+  top: 2px;
+  right: calc(50% - 20px);
+  display: grid;
+  min-width: 17px;
+  height: 17px;
+  place-items: center;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--danger);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.drawer-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 55;
+  background: rgba(4, 6, 12, 0.55);
+  backdrop-filter: blur(2px);
+}
+
+.drawer-close {
+  position: absolute;
+  top: 14px;
+  right: 12px;
+  width: 44px;
+  height: 44px;
+  border: 1px solid var(--line-soft);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--sidebar-text);
+  font-size: 24px;
+  line-height: 1;
 }
 
 /* ---------- responsive ---------- */
@@ -1242,19 +1338,107 @@ body.auth-mode #viewRoot { width: 100%; min-height: 100vh; display: flex; align-
 
 @media (max-width: 980px) {
   .app-shell { grid-template-columns: 1fr; }
-  .sidebar { position: static; height: auto; flex-direction: row; flex-wrap: wrap; align-items: center; }
-  .nav-list { display: flex; flex-wrap: wrap; flex: 1; }
-  .session-panel { margin-top: 0; min-width: 200px; }
+  .app-shell.sidebar-collapsed { grid-template-columns: 1fr; }
   .auth-layout { grid-template-columns: 1fr; }
   .auth-visual { display: none; }
-  .app-shell.sidebar-collapsed .sidebar { display: none; }
+}
+
+/* Phone/tablet layout: the sidebar becomes an off-canvas drawer and primary
+   navigation moves to a thumb-reachable bottom tab bar, so the content column
+   keeps the full screen width instead of stacking 14 nav rows above it. */
+@media (max-width: 900px) {
+  .sidebar {
+    position: fixed;
+    z-index: 60;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: min(84vw, 310px);
+    height: 100dvh;
+    padding: 20px 14px calc(18px + env(safe-area-inset-bottom));
+    overflow-y: auto;
+    transform: translateX(-102%);
+    transition: transform 0.24s ease;
+    box-shadow: 18px 0 40px rgba(0, 0, 0, 0.35);
+  }
+
+  body.drawer-open .sidebar { transform: translateX(0); }
+  body.drawer-open { overflow: hidden; }
+
+  /* The desktop collapse toggle must never hide the drawer on touch screens. */
+  .app-shell.sidebar-collapsed .sidebar { display: flex; }
+  .sidebar-collapsed .sidebar .brand strong,
+  .sidebar-collapsed .sidebar .brand small,
+  .sidebar-collapsed .sidebar .nav-item span,
+  .sidebar-collapsed .sidebar .session-card-mini strong,
+  .sidebar-collapsed .sidebar .session-card-mini small,
+  .sidebar-collapsed .sidebar .session-logout span,
+  .sidebar-collapsed .sidebar .session-hint { display: block; }
+  .sidebar-collapsed .sidebar .nav-item span { display: inline; }
+
+  body.drawer-open .drawer-scrim { display: block; }
+  .drawer-close { display: grid; place-items: center; }
+  .brand { padding-right: 52px; }
+
+  .nav-item { min-height: 48px; font-size: 14.5px; }
+
+  body:not(.auth-mode) .tabbar { display: flex; }
+  body:not(.auth-mode) .main { padding-bottom: calc(84px + env(safe-area-inset-bottom)); }
+
+  .main { padding: 12px 14px; }
+
+  .topbar {
+    position: sticky;
+    z-index: 30;
+    top: 0;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin: -12px -14px 14px;
+    padding: calc(10px + env(safe-area-inset-top)) 14px 10px;
+    border-width: 0 0 1px;
+    border-radius: 0;
+  }
+
+  .sidebar-toggle-slot { order: 0; }
+  .topbar-title { order: 1; flex: 1 1 auto; }
+  .topbar-actions { order: 2; }
+  .search { order: 3; flex: 1 1 100%; max-width: none; margin-left: 0; }
+
+  #pageTitle { font-size: 19px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #termLabel { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .eyebrow { font-size: 10px; }
+
+  /* The theme picker moves into the drawer so the top bar stays one row:
+     menu, page title, notifications, avatar. */
+  .topbar .theme-switch { display: none; }
+  .drawer-theme { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 12px; }
+  .drawer-theme .session-hint { font-weight: 700; }
+  .drawer-theme .theme-dot { width: 26px; height: 26px; }
+
+  /* 44px minimum touch targets across the interactive surface. */
+  .icon-button { width: 44px; height: 44px; }
+  .action, .ctrl-button, .auth-tabs button, .profile-card-button { min-height: 44px; }
+  .search input { min-height: 44px; }
+  input, select, textarea { min-height: 44px; font-size: 16px; } /* 16px stops iOS zoom-on-focus */
+  textarea { min-height: 88px; }
+
+  body { font-size: 14px; }
+  h1 { font-size: 20px; }
+  h2 { font-size: 17px; }
+  h3 { font-size: 15px; }
+  .panel { padding: 14px; border-radius: 16px; }
+  .welcome-banner { padding: 16px; }
+  .welcome-banner h2 { font-size: 19px; }
+  .metric strong { font-size: 22px; }
 }
 
 @media (max-width: 640px) {
-  .main { padding: 14px; }
-  .topbar { flex-direction: column; align-items: stretch; }
-  .topbar-actions { flex-wrap: wrap; }
-  .search { min-width: 0; flex: 1; }
-  .metrics-grid, .form-grid.cols-2, .field-grid { grid-template-columns: 1fr; }
-  .welcome-banner { flex-direction: column; align-items: flex-start; }
+  .form-grid.cols-2, .field-grid { grid-template-columns: minmax(0, 1fr); }
+  .course-grid { grid-template-columns: 1fr; }
+  .welcome-banner { flex-direction: column; align-items: flex-start; gap: 12px; }
+  .section-head { flex-wrap: wrap; gap: 8px; }
+  .auth-layout { padding: 16px; gap: 18px; }
+  /* Keep the avatar, drop the name/role text next to it. */
+  .profile-card-button > span:not(.avatar) { display: none; }
+  .data-table { font-size: 13px; }
 }

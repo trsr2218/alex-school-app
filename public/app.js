@@ -17,6 +17,132 @@ let backendAvailable = window.location.protocol === "file:" ? false : null;
   const initials = (name) => String(name || "VFU").split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0].toUpperCase()).join("") || "VU";
   const jsonResponse = (payload, status = 200) => new Response(JSON.stringify(payload), { status, headers: { "content-type": "application/json; charset=utf-8" } });
 
+  /* --- offline credential + session store -------------------------------
+     Offline mode is a real auth boundary, not a bypass: it verifies a salted
+     SHA-256 password hash and issues a session token exactly like server.js.
+     The digest is hand-written because crypto.subtle is unavailable on
+     file:// pages (a non-secure context) — precisely where this mode runs. */
+  const sha256Hex = (input) => {
+    const K = new Uint32Array([
+      0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+      0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+      0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+      0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+      0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+      0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+      0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+      0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
+    ]);
+    const H = new Uint32Array([0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19]);
+    const bytes = new TextEncoder().encode(String(input));
+    const padded = new Uint8Array((Math.floor((bytes.length + 8) / 64) + 1) * 64);
+    padded.set(bytes);
+    padded[bytes.length] = 0x80;
+    const view = new DataView(padded.buffer);
+    const bitLength = bytes.length * 8;
+    view.setUint32(padded.length - 8, Math.floor(bitLength / 4294967296));
+    view.setUint32(padded.length - 4, bitLength >>> 0);
+    const w = new Uint32Array(64);
+    const rotr = (value, shift) => (value >>> shift) | (value << (32 - shift));
+    for (let offset = 0; offset < padded.length; offset += 64) {
+      for (let i = 0; i < 16; i++) w[i] = view.getUint32(offset + i * 4);
+      for (let i = 16; i < 64; i++) {
+        const s0 = rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ (w[i - 15] >>> 3);
+        const s1 = rotr(w[i - 2], 17) ^ rotr(w[i - 2], 19) ^ (w[i - 2] >>> 10);
+        w[i] = (w[i - 16] + s0 + w[i - 7] + s1) >>> 0;
+      }
+      let [a, b, c, d, e, f, g, h] = H;
+      for (let i = 0; i < 64; i++) {
+        const S1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
+        const ch = (e & f) ^ (~e & g);
+        const t1 = (h + S1 + ch + K[i] + w[i]) >>> 0;
+        const S0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
+        const maj = (a & b) ^ (a & c) ^ (b & c);
+        const t2 = (S0 + maj) >>> 0;
+        h = g; g = f; f = e; e = (d + t1) >>> 0; d = c; c = b; b = a; a = (t1 + t2) >>> 0;
+      }
+      H[0] = (H[0] + a) >>> 0; H[1] = (H[1] + b) >>> 0; H[2] = (H[2] + c) >>> 0; H[3] = (H[3] + d) >>> 0;
+      H[4] = (H[4] + e) >>> 0; H[5] = (H[5] + f) >>> 0; H[6] = (H[6] + g) >>> 0; H[7] = (H[7] + h) >>> 0;
+    }
+    return Array.from(H).map((value) => value.toString(16).padStart(8, "0")).join("");
+  };
+
+  const randomHex = (byteLength) => {
+    const bytes = new Uint8Array(byteLength);
+    if (window.crypto && typeof window.crypto.getRandomValues === "function") window.crypto.getRandomValues(bytes);
+    else for (let i = 0; i < bytes.length; i++) bytes[i] = Math.floor(Math.random() * 256);
+    return Array.from(bytes).map((value) => value.toString(16).padStart(2, "0")).join("");
+  };
+
+  const hashPassword = (password) => {
+    const salt = randomHex(8);
+    return "sha256$" + salt + "$" + sha256Hex(salt + ":" + password);
+  };
+
+  const verifyPassword = (password, stored) => {
+    const parts = String(stored || "").split("$");
+    if (parts.length !== 3 || parts[0] !== "sha256") return false;
+    return sha256Hex(parts[1] + ":" + password) === parts[2];
+  };
+
+  const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
+
+  const issueSession = (data, user) => {
+    const token = "offline-" + randomHex(24);
+    if (!Array.isArray(data.sessions)) data.sessions = [];
+    const now = Date.now();
+    data.sessions = data.sessions.filter((item) => new Date(item.expiresAt).getTime() > now);
+    data.sessions.push({ token, userId: user.id, role: user.role, expiresAt: new Date(now + SESSION_TTL_MS).toISOString() });
+    return token;
+  };
+
+  const bearerToken = (headers) => {
+    const raw = headers && typeof headers === "object" ? (headers.authorization || headers.Authorization || "") : "";
+    const match = /^Bearer\s+(.+)$/i.exec(String(raw));
+    return match ? match[1].trim() : "";
+  };
+
+  // Identity comes from the token only, never from a body field the caller
+  // chose — that is what let anyone sign in as the administrator before.
+  const sessionUser = (data, headers) => {
+    const token = bearerToken(headers);
+    if (!token || !Array.isArray(data.sessions)) return null;
+    const session = data.sessions.find((item) => item.token === token);
+    if (!session || new Date(session.expiresAt).getTime() <= Date.now()) return null;
+    return data.users.find((item) => item.id === session.userId) || null;
+  };
+
+  const STAFF = ["lecturer", "admin"];
+  // Mirrors the requireRole() table in server.js.
+  const ROLE_RULES = [
+    { method: "POST", test: (route) => route === "/api/courses", roles: STAFF },
+    { method: "PATCH", test: (route) => /^\/api\/courses\//.test(route), roles: STAFF },
+    { method: "POST", test: (route) => route === "/api/programs", roles: STAFF },
+    { method: "POST", test: (route) => route === "/api/announcements", roles: STAFF },
+    { method: "POST", test: (route) => route === "/api/tutorials", roles: STAFF },
+    { method: "POST", test: (route) => route === "/api/materials", roles: STAFF },
+    { method: "POST", test: (route) => route === "/api/presentations", roles: STAFF },
+    { method: "PATCH", test: (route) => /^\/api\/presentations\//.test(route), roles: STAFF },
+    { method: "POST", test: (route) => route === "/api/assignments", roles: STAFF },
+    { method: "POST", test: (route) => /^\/api\/sessions\/(start|schedule|begin|end)$/.test(route), roles: STAFF },
+    { method: "POST", test: (route) => route === "/api/admin/users", roles: ["admin"] },
+    { method: "PATCH", test: (route) => /^\/api\/users\//.test(route), roles: ["admin"] }
+  ];
+
+  // Signed-out callers get the institution and the program list, nothing else:
+  // no user directory, no courses, no submissions. Mirrors publicState().
+  const signedOutState = (data) => {
+    const shaped = {};
+    for (const [key, value] of Object.entries(data)) {
+      if (key === "sessions") continue;
+      shaped[key] = Array.isArray(value) ? [] : (value && typeof value === "object" ? {} : value);
+    }
+    shaped.institution = data.institution;
+    shaped.programs = data.programs || [];
+    shaped.authenticated = false;
+    return shaped;
+  };
+
   // Backfills programs/programId onto offline localStorage blobs seeded before
   // this feature shipped, mirroring the server's ensureDataShape/backfillPrograms.
   const backfillOfflinePrograms = (data) => {
@@ -30,6 +156,15 @@ let backendAvailable = window.location.protocol === "file:" ? false : null;
         const field = legacyFieldFor(user.program);
         user.programId = field ? legacyToProgramId[field] : null;
       }
+    }
+    // Blobs stored before offline sign-in was enforced carry no passwordHash.
+    // Restore the seeded accounts' hashes so the demo logins keep working; any
+    // other hash-less account simply cannot sign in (it has no credential).
+    const seedUsers = new Map((window.VFU_SEED_STATE.users || []).map((user) => [String(user.email || "").toLowerCase(), user]));
+    for (const user of data.users) {
+      if (user.passwordHash) continue;
+      const seeded = seedUsers.get(String(user.email || "").toLowerCase());
+      if (seeded && seeded.passwordHash) user.passwordHash = seeded.passwordHash;
     }
     for (const course of data.courses) {
       if (course.parentCourseId === undefined) course.parentCourseId = null;
@@ -50,30 +185,77 @@ let backendAvailable = window.location.protocol === "file:" ? false : null;
     return Boolean(user.programId) && Boolean(course.programId) && user.programId === course.programId;
   };
 
-  const handleOffline = (path, method, body) => {
+  const handleOffline = (path, method, body, headers) => {
     const data = readState();
     if (!Array.isArray(data.studyRooms)) data.studyRooms = [];
     if (!Array.isArray(data.announcements)) data.announcements = [];
     if (!Array.isArray(data.tutorials)) data.tutorials = [];
     if (!Array.isArray(data.materials)) data.materials = [];
-    const actor = data.users.find((item) => item.id === body.userId) || null;
+    if (!Array.isArray(data.sessions)) data.sessions = [];
 
-    if (method === "GET" && path === "/api/state") return jsonResponse(data);
+    const route = path.split("?")[0];
+    const authUser = sessionUser(data, headers);
+    const isPublicRoute = route === "/api/state" || route === "/api/login" || route === "/api/signup" || route === "/api/logout";
+
+    // Everything past the sign-in doors needs a real session, exactly as on the
+    // server. Without this an unregistered visitor could call any route.
+    if (!isPublicRoute && !authUser) return jsonResponse({ error: "Please sign in to continue." }, 401);
+    if (authUser) {
+      const rule = ROLE_RULES.find((item) => item.method === method && item.test(route));
+      if (rule && !rule.roles.includes(authUser.role)) return jsonResponse({ error: "You do not have permission to perform this action." }, 403);
+      body.actingUserId = authUser.id; // the caller does not get to say who it is
+    }
+    const actor = authUser;
+
+    if (method === "GET" && route === "/api/state") {
+      if (!authUser) return jsonResponse(signedOutState(data));
+      return jsonResponse({ ...data, sessions: undefined, users: data.users.map(({ passwordHash, ...user }) => user), authenticated: true });
+    }
     if (method === "POST" && path === "/api/login") {
       const role = String(body.role || "student").toLowerCase();
-      const email = String(body.email || "").toLowerCase();
-      const user = data.users.find((item) => item.role === role && item.email.toLowerCase() === email) || data.users.find((item) => item.role === role) || data.users[0];
-      return jsonResponse({ user, token: `offline-${Date.now()}` });
+      const email = String(body.email || "").trim().toLowerCase();
+      const password = String(body.password || "");
+      // One exact account or nothing. The old fallback chain ("first user with
+      // this role", then "the first user in the file") handed an unregistered
+      // visitor a real session — the administrator's, if they picked Admin.
+      const user = data.users.find((item) => item.role === role && String(item.email || "").toLowerCase() === email);
+      if (!user || !user.passwordHash || !verifyPassword(password, user.passwordHash)) {
+        return jsonResponse({ error: "Incorrect email, role, or password." }, 401);
+      }
+      const token = issueSession(data, user);
+      saveState(data);
+      const { passwordHash, ...safeUser } = user;
+      return jsonResponse({ user: safeUser, token });
     }
-    if (method === "POST" && path === "/api/logout") return jsonResponse({ message: "Signed out." });
+    if (method === "POST" && path === "/api/logout") {
+      const token = bearerToken(headers);
+      if (token) { data.sessions = data.sessions.filter((item) => item.token !== token); saveState(data); }
+      return jsonResponse({ message: "Signed out." });
+    }
     if (method === "POST" && path === "/api/signup") {
       const email = String(body.email || "").trim().toLowerCase();
-      if (!email || data.users.some((user) => user.email.toLowerCase() === email)) return jsonResponse({ error: "Use a new valid email address." }, 400);
-      // Public self-registration is student-only, matching the server.
-      const user = { id: `u-student-${Date.now()}`, name: String(body.name || "New User").trim(), email, role: "student", program: String(body.program || body.department || "VFU").trim(), studentNumber: body.studentNumber || "", staffNumber: body.staffNumber || "", phone: body.phone || "", avatar: initials(body.name), createdAt: new Date().toISOString(), pendingBalance: 0 };
-      data.users.push(user); saveState(data); return jsonResponse({ user, token: `offline-${Date.now()}` }, 201);
+      const name = String(body.name || "").trim();
+      const password = String(body.password || "");
+      if (!name) return jsonResponse({ error: "Name and email are required." }, 400);
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return jsonResponse({ error: "Please provide a valid email address." }, 400);
+      if (data.users.some((user) => String(user.email || "").toLowerCase() === email)) return jsonResponse({ error: "An account with that email already exists." }, 409);
+      if (password.length < 6) return jsonResponse({ error: "Password must be at least 6 characters." }, 400);
+      // Public self-registration is student-only, matching the server: lecturer
+      // and admin accounts can only be provisioned by a signed-in admin.
+      const programId = String(body.programId || "") || null;
+      const program = (data.programs || []).find((item) => item.id === programId);
+      // No unassigned self-registrations, matching handleSignup() on the server.
+      if (!program) return jsonResponse({ error: "Choose the program you are registered for." }, 400);
+      if (!String(body.studentNumber || "").trim()) return jsonResponse({ error: "Your student number is required to register." }, 400);
+      const user = { id: `u-student-${Date.now()}`, name, email, role: "student", program: program.name, programId, studentNumber: String(body.studentNumber || ""), staffNumber: "", phone: String(body.phone || ""), avatar: initials(name), passwordHash: hashPassword(password), createdAt: new Date().toISOString(), pendingBalance: 0 };
+      data.users.push(user);
+      const token = issueSession(data, user);
+      saveState(data);
+      const { passwordHash, ...safeUser } = user;
+      return jsonResponse({ user: safeUser, token }, 201);
     }
     if (method === "POST" && path === "/api/attendance") {
+      if (authUser.role === "student" && body.userId !== authUser.id) return jsonResponse({ error: "You can only mark your own attendance." }, 403);
       const session = data.classSessions.find((item) => item.id === body.sessionId);
       const exists = data.attendance.some((item) => item.sessionId === body.sessionId && item.userId === body.userId);
       if (session && !exists) { data.attendance.push({ id: `att-${Date.now()}`, sessionId: session.id, courseId: session.courseId, userId: body.userId, status: "Present", joinedAt: new Date().toISOString() }); saveState(data); }
@@ -84,7 +266,7 @@ let backendAvailable = window.location.protocol === "file:" ? false : null;
       if (!course) return jsonResponse({ error: "Course was not found." }, 404);
       if (data.classSessions.some((item) => item.courseId === course.id && item.status === "Live")) return jsonResponse({ error: "A live class is already running for this course." }, 409);
       const duration = Number(body.duration);
-      const session = { id: `session-${Date.now()}`, courseId: course.id, title: String(body.title || "").trim() || `${course.title} live class`, startsAt: new Date().toISOString(), duration: duration > 0 ? Math.min(duration, 480) : 60, status: "Live", participants: 0, hostId: body.userId || "u-lecturer-1" };
+      const session = { id: `session-${Date.now()}`, courseId: course.id, title: String(body.title || "").trim() || `${course.title} live class`, startsAt: new Date().toISOString(), duration: duration > 0 ? Math.min(duration, 480) : 60, status: "Live", participants: 0, hostId: authUser.id };
       data.classSessions.push(session); saveState(data);
       return jsonResponse({ session, classSessions: data.classSessions }, 201);
     }
@@ -110,7 +292,7 @@ let backendAvailable = window.location.protocol === "file:" ? false : null;
       const startsAt = new Date(body.startsAt || "");
       if (Number.isNaN(startsAt.getTime()) || startsAt.getTime() <= Date.now()) return jsonResponse({ error: "Scheduled time must be a valid date in the future." }, 400);
       const duration = Number(body.duration);
-      const session = { id: `session-${Date.now()}`, courseId: course.id, title: String(body.title || "").trim() || `${course.title} live class`, startsAt: startsAt.toISOString(), duration: duration > 0 ? Math.min(duration, 480) : 60, status: "Scheduled", participants: 0, hostId: body.userId || "u-lecturer-1" };
+      const session = { id: `session-${Date.now()}`, courseId: course.id, title: String(body.title || "").trim() || `${course.title} live class`, startsAt: startsAt.toISOString(), duration: duration > 0 ? Math.min(duration, 480) : 60, status: "Scheduled", participants: 0, hostId: authUser.id };
       data.classSessions.push(session); saveState(data);
       return jsonResponse({ session, classSessions: data.classSessions }, 201);
     }
@@ -119,7 +301,7 @@ let backendAvailable = window.location.protocol === "file:" ? false : null;
       if (!session) return jsonResponse({ error: "Class session was not found." }, 404);
       if (session.status !== "Scheduled") return jsonResponse({ error: "This session is not in a scheduled state." }, 409);
       if (data.classSessions.some((item) => item.courseId === session.courseId && item.status === "Live")) return jsonResponse({ error: "A live class is already running for this course." }, 409);
-      session.status = "Live"; session.startsAt = new Date().toISOString(); session.hostId = body.userId || session.hostId;
+      session.status = "Live"; session.startsAt = new Date().toISOString(); session.hostId = authUser.id;
       saveState(data);
       return jsonResponse({ session, classSessions: data.classSessions });
     }
@@ -139,6 +321,7 @@ let backendAvailable = window.location.protocol === "file:" ? false : null;
       return jsonResponse({ session, attendance: data.attendance, message: "Class ended. Missing students were marked absent." });
     }
     if (method === "POST" && path === "/api/submissions") {
+      if (body.userId !== authUser.id) return jsonResponse({ error: "You can only submit your own work." }, 403);
       const assignment = data.assignments.find((item) => item.id === body.assignmentId);
       if (!assignment) return jsonResponse({ error: "Assignment was not found." }, 404);
       const text = String(body.text || "").trim();
@@ -161,7 +344,7 @@ let backendAvailable = window.location.protocol === "file:" ? false : null;
     }
     if (method === "POST" && path === "/api/discussions/reply") {
       const discussion = data.discussions.find((item) => item.id === body.discussionId);
-      const user = data.users.find((item) => item.id === body.userId);
+      const user = authUser;
       if (discussion && user) { discussion.replies.push({ id: `reply-${Date.now()}`, userId: user.id, author: user.name, text: String(body.text || "").trim(), createdAt: new Date().toISOString() }); saveState(data); }
       return jsonResponse({ discussions: data.discussions, message: "Reply posted." });
     }
@@ -295,8 +478,8 @@ let backendAvailable = window.location.protocol === "file:" ? false : null;
       return jsonResponse({ presentation, presentations: data.presentations });
     }
     if (method === "POST" && path === "/api/messages") {
-      const sender = data.users.find((item) => item.id === body.senderId);
-      if (!sender) return jsonResponse({ error: "You can only send messages as yourself." }, 403);
+      if (body.senderId && body.senderId !== authUser.id) return jsonResponse({ error: "You can only send messages as yourself." }, 403);
+      const sender = authUser;
       const recipientId = String(body.recipientId || "");
       const text = String(body.text || "").trim();
       if (!recipientId || !data.users.some((item) => item.id === recipientId)) return jsonResponse({ error: "Recipient was not found." }, 400);
@@ -309,9 +492,7 @@ let backendAvailable = window.location.protocol === "file:" ? false : null;
     if (method === "GET" && path.split("?")[0] === "/api/messages") {
       // A GET has no request body, so identity travels via query string here only
       // (served mode ignores this param entirely and authenticates via the Bearer header).
-      const query = new URLSearchParams(path.split("?")[1] || "");
-      const requester = data.users.find((item) => item.id === query.get("actingUserId"));
-      if (!requester) return jsonResponse({ error: "Sign in required." }, 401);
+      const requester = authUser;
       const mine = data.messages.filter((item) => item.senderId === requester.id || item.recipientId === requester.id);
       return jsonResponse({ messages: mine });
     }
@@ -383,20 +564,22 @@ let backendAvailable = window.location.protocol === "file:" ? false : null;
     const method = options.method || "GET";
     const body = options.body ? JSON.parse(options.body) : {};
 
-    if (backendAvailable === false) return handleOffline(path, method, body);
+    const headers = options.headers || {};
+
+    if (backendAvailable === false) return handleOffline(path, method, body, headers);
 
     try {
       const response = await originalFetch(resource, options);
       const contentType = response.headers.get("content-type") || "";
       if (!contentType.includes("application/json")) {
         backendAvailable = false;
-        return handleOffline(path, method, body);
+        return handleOffline(path, method, body, headers);
       }
       backendAvailable = true;
       return response;
     } catch (error) {
       backendAvailable = false;
-      return handleOffline(path, method, body);
+      return handleOffline(path, method, body, headers);
     }
   };
 })();
@@ -423,6 +606,11 @@ const sidebarKey = "vfu-sidebar";
 let state = null, currentRoute = "dashboard", currentUser = null, query = "", authMode = "login", authRole = "student";
 let localStream = null, screenStream = null;
 let sidebarCollapsed = localStorage.getItem(sidebarKey) === "collapsed";
+let drawerOpen = false;
+// Bottom tab bar: the four routes a phone user reaches most, plus "More" for
+// the rest (the full list stays in the drawer). Ids must exist in `routes`.
+const MOBILE_TABS = ["dashboard", "courses", "classroom", "messages"];
+const isMobileLayout = () => window.matchMedia("(max-width: 900px)").matches;
 let roomSocket = null, roomSocketChannel = null;
 let roomSocketReconnectTimer = null, roomSocketIntentionalClose = false;
 let userSocket = null;
@@ -441,7 +629,7 @@ let pendingSlideFiles = [];
 
 /* ============================== dom + icons ============================== */
 
-const viewRoot = document.querySelector("#viewRoot"), navList = document.querySelector("#navList"), sessionPanel = document.querySelector("#sessionPanel"), profileCard = document.querySelector("#profileCard"), pageTitle = document.querySelector("#pageTitle"), termLabel = document.querySelector("#termLabel"), notificationCount = document.querySelector("#notificationCount"), notificationButton = document.querySelector("#notificationButton"), noticeStack = document.querySelector("#noticeStack"), themeSwitch = document.querySelector("#themeSwitch"), appShell = document.querySelector("#appShell"), sidebarToggleSlot = document.querySelector("#sidebarToggleSlot");
+const viewRoot = document.querySelector("#viewRoot"), navList = document.querySelector("#navList"), sessionPanel = document.querySelector("#sessionPanel"), profileCard = document.querySelector("#profileCard"), pageTitle = document.querySelector("#pageTitle"), termLabel = document.querySelector("#termLabel"), notificationCount = document.querySelector("#notificationCount"), notificationButton = document.querySelector("#notificationButton"), noticeStack = document.querySelector("#noticeStack"), themeSwitch = document.querySelector("#themeSwitch"), appShell = document.querySelector("#appShell"), sidebarToggleSlot = document.querySelector("#sidebarToggleSlot"), tabBar = document.querySelector("#tabBar"), drawerScrim = document.querySelector("#drawerScrim");
 
 const iconPaths = {
   layout: "<rect x='3' y='3' width='7' height='7'></rect><rect x='14' y='3' width='7' height='7'></rect><rect x='14' y='14' width='7' height='7'></rect><rect x='3' y='14' width='7' height='7'></rect>",
@@ -561,7 +749,14 @@ function applyTheme(name, persist = true) {
   const theme = ["dark", "light", "ocean"].includes(name) ? name : "dark";
   document.documentElement.dataset.theme = theme;
   if (persist) localStorage.setItem(themeKey, theme);
-  themeSwitch?.querySelectorAll(".theme-dot").forEach((dot) => dot.classList.toggle("active", dot.dataset.themeSet === theme));
+  syncThemeDots();
+}
+
+// Every theme control on the page, including the drawer copy phones use (the
+// drawer's markup is re-rendered by renderShell, so it re-syncs from there too).
+function syncThemeDots() {
+  const theme = document.documentElement.dataset.theme || "dark";
+  document.querySelectorAll(".theme-dot").forEach((dot) => dot.classList.toggle("active", dot.dataset.themeSet === theme));
 }
 
 /* ============================== media (WebRTC device capture) ============================== */
@@ -923,7 +1118,7 @@ function renderAuth() {
     <form class="auth-form" id="authForm" data-mode="${authMode}"><div><p class="eyebrow">${isLogin ? "Secure access" : "Learner registration"}</p><h2>${isLogin ? "Sign in to your classroom" : "Create your student account"}</h2></div>
       ${isLogin ? `<label>Role<select name="role" id="loginRole"><option value="student" ${authRole === "student" ? "selected" : ""}>Student</option><option value="lecturer" ${authRole === "lecturer" ? "selected" : ""}>Lecturer</option><option value="admin" ${authRole === "admin" ? "selected" : ""}>Admin</option></select></label>` : `<input type="hidden" name="role" value="student"><label>Full name<input name="name" required placeholder="Enter full name"></label>`}
       <label>Email<input name="email" type="email" required autocomplete="off" placeholder="name@vfu.edu"></label><label>Password<input name="password" type="password" required minlength="6" autocomplete="off" placeholder="Enter your password"></label>
-      ${!isLogin ? `<div class="field-grid"><label>Student number<input name="studentNumber" required placeholder="VFU-ST-2026-001"></label><label>Program<select name="program"><option>BSc Information and Communication Technology</option><option>BSc Business and Financial Management</option><option>Diploma in ICT</option></select></label></div><label>Phone<input name="phone" placeholder="Optional"></label>` : ""}
+      ${!isLogin ? `<div class="field-grid"><label>Student number<input name="studentNumber" required placeholder="VFU-ST-2026-001"></label><label>Program<select name="programId" required>${(state.programs || []).map((program) => `<option value="${escapeHtml(program.id)}">${escapeHtml(program.name)}</option>`).join("")}</select></label></div><label>Phone<input name="phone" placeholder="Optional"></label>` : ""}
       <button class="action primary wide" type="submit">${icon(isLogin ? "logout" : "plus")} ${isLogin ? "Login" : "Create account"}</button>${isLogin ? `<p class="auth-note">Select your role, then enter the email and password provided to you.</p>` : ""}
     </form></div></section>`;
 }
@@ -1456,8 +1651,35 @@ function renderProfile() {
 
 /* ============================== shell + render ============================== */
 
+function setDrawer(open) {
+  drawerOpen = Boolean(open) && Boolean(currentUser);
+  document.body.classList.toggle("drawer-open", drawerOpen);
+  if (drawerScrim) drawerScrim.hidden = !drawerOpen;
+}
+
+function renderTabBar(unreadMessageCount) {
+  if (!tabBar) return;
+  if (!currentUser) { tabBar.innerHTML = ""; return; }
+  const allowed = visibleRoutes();
+  const tabs = MOBILE_TABS
+    .map((id) => allowed.find((route) => route.id === id))
+    .filter(Boolean)
+    .map((route) => {
+      const badge = route.id === "messages" && unreadMessageCount ? `<span class="tab-badge">${unreadMessageCount > 9 ? "9+" : unreadMessageCount}</span>` : "";
+      const label = route.id === "dashboard" ? "Home" : route.label;
+      return `<button class="tab-item ${route.id === currentRoute ? "active" : ""}" type="button" data-route="${route.id}" aria-current="${route.id === currentRoute ? "page" : "false"}">${icon(route.icon)}<span>${escapeHtml(label)}</span>${badge}</button>`;
+    });
+  const moreActive = !MOBILE_TABS.includes(currentRoute);
+  tabs.push(`<button class="tab-item ${moreActive ? "active" : ""}" type="button" data-drawer-open aria-label="More sections">${icon("menu")}<span>More</span></button>`);
+  tabBar.innerHTML = tabs.join("");
+}
+
 function renderShell() {
   document.body.classList.toggle("auth-mode", !currentUser);
+  if (!currentUser && drawerOpen) setDrawer(false);
+  // Signing in lands on the dashboard without going through setRoute(), so the
+  // heading is set here rather than only on navigation.
+  if (currentUser) pageTitle.textContent = routes.find((item) => item.id === currentRoute)?.label || "Dashboard";
   appShell?.classList.toggle("sidebar-collapsed", sidebarCollapsed);
   if (sidebarToggleSlot) {
     sidebarToggleSlot.innerHTML = currentUser ? `<button class="icon-button" type="button" data-sidebar-toggle title="${sidebarCollapsed ? "Show sidebar" : "Hide sidebar"}" aria-expanded="${!sidebarCollapsed}">${icon("menu")}</button>` : "";
@@ -1468,11 +1690,15 @@ function renderShell() {
   if (sessionPanel) {
     sessionPanel.innerHTML = !currentUser
       ? `<p class="session-hint">Sign in or create a student account.</p>`
-      : `<div class="session-card-mini">${renderAvatar(currentUser)}<div><strong>${escapeHtml(currentUser.name)}</strong><small>${escapeHtml(roleLabels[currentUser.role] || currentUser.role)} | ${escapeHtml(currentUser.program || "VFU")}</small></div></div><button class="session-logout" type="button" data-logout>${icon("logout")} Log Out</button>`;
+      : `<div class="session-card-mini">${renderAvatar(currentUser)}<div><strong>${escapeHtml(currentUser.name)}</strong><small>${escapeHtml(roleLabels[currentUser.role] || currentUser.role)} | ${escapeHtml(currentUser.program || "VFU")}</small></div></div>
+         <div class="drawer-theme"><span class="session-hint">Theme</span><div class="theme-switch" role="group" aria-label="Theme"><button class="theme-dot theme-dot-dark" type="button" data-theme-set="dark" title="Dark theme"></button><button class="theme-dot theme-dot-light" type="button" data-theme-set="light" title="Light theme"></button><button class="theme-dot theme-dot-ocean" type="button" data-theme-set="ocean" title="Ocean theme"></button></div></div>
+         <button class="session-logout" type="button" data-logout>${icon("logout")} Log Out</button>`;
   }
   if (profileCard) {
     profileCard.innerHTML = currentUser ? `<button class="profile-card-button" type="button" data-route="profile">${renderAvatar(currentUser)}<span><strong>${escapeHtml(currentUser.name)}</strong><small>${escapeHtml(currentUser.role)}</small></span></button>` : "";
   }
+  syncThemeDots();
+  renderTabBar(unreadMessageCount);
   const unread = state?.notifications?.filter((item) => !item.read).length || 0;
   notificationCount.textContent = unread;
   notificationCount.hidden = unread === 0;
@@ -1497,6 +1723,8 @@ function render() {
 
 function setRoute(route) {
   currentRoute = route;
+  setDrawer(false);
+  window.scrollTo(0, 0);
   pageTitle.textContent = routes.find((item) => item.id === route)?.label || "Dashboard";
   render();
 }
@@ -1504,6 +1732,23 @@ function setRoute(route) {
 async function loadState() {
   state = await api("/api/state");
   const session = readSession();
+
+  // The server is the only authority on who is signed in. A stale, expired or
+  // hand-edited localStorage entry must never produce a signed-in dashboard,
+  // so anything the backend does not recognise is dropped back to the login screen.
+  if (state.authenticated === false) {
+    if (session) {
+      clearSession();
+      showToast("Your session has ended. Please sign in again.", "error");
+    }
+    currentUser = null;
+    myMessages = [];
+    openThreadUserId = null;
+    disconnectUserSocket();
+    render();
+    return;
+  }
+
   if (session?.user?.id) currentUser = state.users.find((user) => user.id === session.user.id) || session.user;
   if (currentUser) {
     connectUserSocket();
@@ -1771,7 +2016,12 @@ function handleViewInteraction(event) {
   if (data.route) return setRoute(data.route);
   if (data.routeJump) return setRoute(data.routeJump);
   if (data.themeSet) return applyTheme(data.themeSet);
+  if ("drawerOpen" in data) { setDrawer(true); return; }
+  if ("drawerClose" in data) { setDrawer(false); return; }
   if ("sidebarToggle" in data) {
+    // On phones the same button opens the off-canvas drawer; on desktop it
+    // still collapses the sidebar to its icon rail.
+    if (isMobileLayout()) { setDrawer(!drawerOpen); return; }
     sidebarCollapsed = !sidebarCollapsed;
     localStorage.setItem(sidebarKey, sidebarCollapsed ? "collapsed" : "expanded");
     render();
@@ -1846,6 +2096,14 @@ function handleViewInteraction(event) {
 
 function registerAppEvents() {
   document.addEventListener("click", handleViewInteraction);
+
+  drawerScrim?.addEventListener("click", () => setDrawer(false));
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && drawerOpen) setDrawer(false);
+  });
+  window.addEventListener("resize", () => {
+    if (drawerOpen && !isMobileLayout()) setDrawer(false);
+  });
 
   document.addEventListener("submit", async (event) => {
     const form = event.target;
@@ -2131,6 +2389,14 @@ function registerAppEvents() {
 applyTheme(localStorage.getItem(themeKey) || "dark", false);
 registerAppEvents();
 if (readSession()) bumpUsage();
+// Installable (PWA) build: registering the shell worker is what lets students
+// add the classroom to their home screen and open it like a native app.
+if ("serviceWorker" in navigator && location.protocol.startsWith("http")) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("sw.js").catch(() => { /* offline shell is optional */ });
+  });
+}
+
 loadState().catch(() => {
   viewRoot.innerHTML = emptyState("Could not load the classroom", "Refresh the page to try again.");
 });

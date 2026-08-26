@@ -20,13 +20,24 @@ Then open:
 http://localhost:3000
 ```
 
+## On a phone
+
+The layout is responsive down to ~320px: below 900px the sidebar becomes a slide-in drawer and primary navigation moves to a bottom tab bar (Home, My Courses, Live Room, Messages, More), with 44px touch targets throughout.
+
+It is also installable. Open the deployed URL in Chrome or Safari on the phone and choose "Add to Home Screen" — it launches full screen with its own icon. For a Play Store listing, wrap the same URL as a Trusted Web Activity (e.g. with Bubblewrap) rather than rebuilding the app natively; `public/manifest.webmanifest` already provides the name, icon, colours and shortcuts a TWA needs.
+
 ## Demo Roles
 
 - Student: `student@vfu.local` / `student123`
 - Lecturer: `lecturer@vfu.local` / `lecturer123`
 - Admin: `admin@vfu.local` / `admin123`
 
-The login form pre-fills the password for whichever role is selected.
+Sign-in is enforced in **both** runtimes (the Node server and the offline/static fallback):
+
+- Only a registered account can sign in. An unknown email is rejected, and so is a real account used under the wrong role — picking "Admin" on the login form does not grant an admin session.
+- Self-registration creates a **student**, always, whatever role the request asks for, and only with a real program and student number. Lecturer and admin accounts are provisioned by an existing admin.
+- Signed-out visitors get no data at all from the API beyond the institution name and program list — no user directory to enumerate.
+- A tampered or expired session in browser storage drops straight back to the login screen.
 
 ## Deploying (zero-cost)
 

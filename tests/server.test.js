@@ -561,3 +561,89 @@ test('messages: identity-checked sending, GET returns only the caller\'s own mes
   assert.equal(markRead.status, 200);
   assert.equal(markRead.payload.message.read, true);
 });
+
+// ---------------------------------------------------------------------------
+// Phase 3: no data and no accounts for callers who are not signed in.
+// ---------------------------------------------------------------------------
+
+test('GET /api/state hides the user directory and course data from signed-out callers', async () => {
+  const signedOut = await requestJson(`http://127.0.0.1:${phase1Port}/api/state`);
+  assert.equal(signedOut.status, 200);
+  assert.equal(signedOut.payload.authenticated, false);
+  // The login screen still needs these two.
+  assert.equal(signedOut.payload.institution.name, 'VFU E-Learning Classroom');
+  assert.ok(signedOut.payload.programs.length > 0);
+  // Nothing else leaks: no accounts to enumerate, no course or submission data.
+  assert.deepEqual(signedOut.payload.users, []);
+  assert.deepEqual(signedOut.payload.courses, []);
+  assert.deepEqual(signedOut.payload.submissions, []);
+  assert.equal(JSON.stringify(signedOut.payload).includes('passwordHash'), false);
+
+  const signedIn = await requestJson(`http://127.0.0.1:${phase1Port}/api/state`, {
+    headers: { authorization: `Bearer ${phase1Tokens.student}` }
+  });
+  assert.equal(signedIn.status, 200);
+  assert.equal(signedIn.payload.authenticated, true);
+  assert.ok(signedIn.payload.users.length > 0);
+  assert.equal(JSON.stringify(signedIn.payload).includes('passwordHash'), false);
+  assert.equal(signedIn.payload.sessions, undefined);
+});
+
+test('GET /api/state treats a forged or expired bearer token as signed out', async () => {
+  const forged = await requestJson(`http://127.0.0.1:${phase1Port}/api/state`, {
+    headers: { authorization: 'Bearer not-a-real-token' }
+  });
+  assert.equal(forged.status, 200);
+  assert.equal(forged.payload.authenticated, false);
+  assert.deepEqual(forged.payload.users, []);
+});
+
+test('public signup cannot claim a role and cannot create an unassigned account', async () => {
+  await withServer(async ({ port }) => {
+    const programs = await requestJson(`http://127.0.0.1:${port}/api/state`);
+    const programId = programs.payload.programs[0].id;
+
+    // A caller asking for "admin" gets a student, never an administrator.
+    const escalation = await requestJson(`http://127.0.0.1:${port}/api/signup`, {
+      method: 'POST',
+      body: { name: 'Role Climber', email: `climber-${Date.now()}@vfu.local`, password: 'password1', role: 'admin', programId, studentNumber: 'VFU-ST-2026-900' }
+    });
+    assert.equal(escalation.status, 201);
+    assert.equal(escalation.payload.user.role, 'student');
+
+    // Registration without a program (or without a student number) is refused
+    // rather than creating an unassigned account.
+    const unassigned = await requestJson(`http://127.0.0.1:${port}/api/signup`, {
+      method: 'POST',
+      body: { name: 'No Program', email: `noprogram-${Date.now()}@vfu.local`, password: 'password1', studentNumber: 'VFU-ST-2026-901' }
+    });
+    assert.equal(unassigned.status, 400);
+    assert.match(unassigned.payload.error, /program/i);
+
+    const noStudentNumber = await requestJson(`http://127.0.0.1:${port}/api/signup`, {
+      method: 'POST',
+      body: { name: 'No Number', email: `nonumber-${Date.now()}@vfu.local`, password: 'password1', programId }
+    });
+    assert.equal(noStudentNumber.status, 400);
+    assert.match(noStudentNumber.payload.error, /student number/i);
+  });
+});
+
+test('login refuses an unregistered email and refuses a real account under the wrong role', async () => {
+  await withServer(async ({ port }) => {
+    const unregistered = await requestJson(`http://127.0.0.1:${port}/api/login`, {
+      method: 'POST',
+      body: { role: 'admin', email: 'nobody@vfu.local', password: 'admin123' }
+    });
+    assert.equal(unregistered.status, 401);
+    assert.equal(unregistered.payload.token, undefined);
+
+    // A genuine student account cannot be used to sign in as an administrator.
+    const wrongRole = await requestJson(`http://127.0.0.1:${port}/api/login`, {
+      method: 'POST',
+      body: { role: 'admin', email: 'student@vfu.local', password: 'student123' }
+    });
+    assert.equal(wrongRole.status, 401);
+    assert.equal(wrongRole.payload.token, undefined);
+  });
+});

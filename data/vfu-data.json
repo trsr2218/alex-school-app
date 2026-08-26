@@ -283,17 +283,9 @@
     }
   ],
   "materials": [],
-  "sessions": [
-    {
-      "token": "6e1149541651fcfe10d908d3ec9663a874e3291ddafcdcb6",
-      "userId": "u-admin-1",
-      "role": "admin",
-      "name": "System Administrator",
-      "email": "admin@vfu.local",
-      "createdAt": 1785280032388,
-      "expiresAt": 1785323232388
-    }
-  ],
+  "presentations": [],
+  "messages": [],
+  "sessions": [],
   "analytics": {
     "activeStudents": 118,
     "attendanceRate": 86,

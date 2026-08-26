@@ -2,13 +2,23 @@
 <html lang="en" data-theme="dark">
   <head>
     <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#0a0a0c">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="VFU E-Class">
     <title>VFU E-Learning Classroom</title>
+    <link rel="manifest" href="manifest.webmanifest">
+    <link rel="icon" href="icon.svg" type="image/svg+xml">
+    <link rel="apple-touch-icon" href="icon.svg">
     <link rel="stylesheet" href="styles.css">
   </head>
   <body>
     <div class="app-shell" id="appShell">
-      <aside class="sidebar" aria-label="Primary">
+      <div class="drawer-scrim" id="drawerScrim" hidden></div>
+
+      <aside class="sidebar" id="sidebar" aria-label="Primary">
         <a class="brand" href="#dashboard" data-route="dashboard" aria-label="VFU dashboard">
           <span class="brand-mark">V</span>
           <span>
@@ -17,6 +27,10 @@
           </span>
         </a>
 
+        <button class="drawer-close" type="button" data-drawer-close aria-label="Close menu">
+          <span aria-hidden="true">&times;</span>
+        </button>
+
         <nav class="nav-list" id="navList"></nav>
 
         <section class="session-panel" id="sessionPanel" aria-label="Active session"></section>
@@ -24,16 +38,16 @@
 
       <main class="main">
         <header class="topbar">
-          <div>
+          <div class="sidebar-toggle-slot" id="sidebarToggleSlot"></div>
+          <div class="topbar-title">
             <p class="eyebrow" id="termLabel">June 2026 Semester</p>
             <h1 id="pageTitle">Dashboard</h1>
           </div>
+          <label class="search">
+            <span aria-hidden="true">/</span>
+            <input id="searchInput" type="search" placeholder="Search courses, assignments, discussions">
+          </label>
           <div class="topbar-actions">
-            <div class="sidebar-toggle-slot" id="sidebarToggleSlot"></div>
-            <label class="search">
-              <span aria-hidden="true">/</span>
-              <input id="searchInput" type="search" placeholder="Search courses, assignments, discussions">
-            </label>
             <div class="theme-switch" id="themeSwitch" role="group" aria-label="Theme">
               <button class="theme-dot theme-dot-dark" type="button" data-theme-set="dark" title="Dark theme"></button>
               <button class="theme-dot theme-dot-light" type="button" data-theme-set="light" title="Light theme"></button>
@@ -50,6 +64,8 @@
         <section class="notice-stack" id="noticeStack" aria-live="polite"></section>
         <section id="viewRoot" class="view-root"></section>
       </main>
+
+      <nav class="tabbar" id="tabBar" aria-label="Primary mobile"></nav>
     </div>
 
     <script src="state.js"></script>

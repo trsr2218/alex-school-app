@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node server.js",
-    "test": "node --test tests/server.test.js"
+    "test": "node --test tests/server.test.js tests/offline-shim.test.js"
   },
   "keywords": [
     "elearning",

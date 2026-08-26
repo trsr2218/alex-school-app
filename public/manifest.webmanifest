@@ -1,0 +1,22 @@
+{
+  "name": "VFU E-Learning Classroom",
+  "short_name": "VFU E-Class",
+  "description": "Live classes, attendance, assignments, group study, and analytics for VFU students, lecturers, and administrators.",
+  "id": "/",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0a0a0c",
+  "theme_color": "#0a0a0c",
+  "categories": ["education", "productivity"],
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "maskable" }
+  ],
+  "shortcuts": [
+    { "name": "Live Room", "url": "/#classroom" },
+    { "name": "Assignments", "url": "/#assignments" },
+    { "name": "Attendance", "url": "/#attendance" }
+  ]
+}

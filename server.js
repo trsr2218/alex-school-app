@@ -14,6 +14,7 @@ const mimeTypes = {
   ".css": "text/css; charset=utf-8",
   ".js": "application/javascript; charset=utf-8",
   ".json": "application/json; charset=utf-8",
+  ".webmanifest": "application/manifest+json; charset=utf-8",
   ".svg": "image/svg+xml; charset=utf-8",
   ".png": "image/png",
   ".jpg": "image/jpeg",
@@ -110,12 +111,22 @@ function requireRole(auth, res, allowedRoles) {
 }
 
 const rateLimitBuckets = new Map();
+
+// Peek only — recordAttempt() is what fills the bucket. Login records just its
+// failures, so a lab full of students signing in legitimately from one NAT'd IP
+// is never locked out, while password guessing still runs out of attempts.
 function isRateLimited(key, limit = 10, windowMs = 5 * 60 * 1000) {
+  const now = Date.now();
+  const bucket = (rateLimitBuckets.get(key) || []).filter((ts) => now - ts < windowMs);
+  rateLimitBuckets.set(key, bucket);
+  return bucket.length >= limit;
+}
+
+function recordAttempt(key, windowMs = 5 * 60 * 1000) {
   const now = Date.now();
   const bucket = (rateLimitBuckets.get(key) || []).filter((ts) => now - ts < windowMs);
   bucket.push(now);
   rateLimitBuckets.set(key, bucket);
-  return bucket.length > limit;
 }
 
 function applySecurityHeaders(res) {
@@ -502,6 +513,8 @@ function publicFilePath(urlPath) {
   return filePath;
 }
 
+// Returns true when the caller was signed in, false for every rejected attempt
+// (the caller uses that to decide whether to charge the rate-limit bucket).
 async function handleLogin(res, data, body) {
   const role = normalizeRole(body.role);
   const email = sanitizeText(body.email).toLowerCase();
@@ -509,7 +522,7 @@ async function handleLogin(res, data, body) {
 
   if (!isValidEmail(email)) {
     sendJson(res, 400, { error: "Please provide a valid email address." });
-    return;
+    return false;
   }
 
   const pool = await getDbPool();
@@ -520,10 +533,10 @@ async function handleLogin(res, data, body) {
       if (row && verifyPassword(password, row.password_hash)) {
         const user = mapDbUser(row);
         sendJson(res, 200, { user, token: issueSession(data, user) });
-        return;
+        return true;
       }
       sendJson(res, 401, { error: "Incorrect email, role, or password." });
-      return;
+      return false;
     } catch (error) {
       console.warn("MySQL login lookup failed:", error.message);
     }
@@ -535,10 +548,11 @@ async function handleLogin(res, data, body) {
 
   if (!fallbackUser || !verifyPassword(password, fallbackUser.passwordHash)) {
     sendJson(res, 401, { error: "Incorrect email, role, or password." });
-    return;
+    return false;
   }
 
   sendJson(res, 200, { user: stripPasswordHash(fallbackUser), token: issueSession(data, fallbackUser) });
+  return true;
 }
 
 // Shared account-creation logic used by both public signup (role forced to
@@ -555,8 +569,9 @@ async function createUserRecord(data, input) {
   const pwdError = validatePassword(password);
   if (pwdError) return { status: 400, error: pwdError };
 
-  const program = sanitizeText(input.program || input.department || "VFU");
   const programId = sanitizeText(input.programId) || null;
+  const programRecord = programId ? (data.programs || []).find((item) => item.id === programId) : null;
+  const program = sanitizeText(input.program || input.department || (programRecord ? programRecord.name : "") || "VFU");
   const studentNumber = sanitizeText(input.studentNumber);
   const staffNumber = sanitizeText(input.staffNumber);
   const phone = sanitizeText(input.phone);
@@ -612,7 +627,21 @@ async function handleSignup(res, data, body) {
   // Public self-registration is student-only. Elevated roles (lecturer/admin)
   // must be provisioned by an existing admin via POST /api/admin/users, not
   // chosen by the signup caller — otherwise anyone can register as an admin.
-  const result = await createUserRecord(data, { ...body, role: "student" });
+  const programId = sanitizeText(body.programId);
+  if (!programId || !(data.programs || []).some((program) => program.id === programId)) {
+    // No unassigned self-registrations: a student account is only meaningful
+    // against a real program, and course access is granted off that field.
+    sendJson(res, 400, { error: "Choose the program you are registered for." });
+    return;
+  }
+
+  const studentNumber = sanitizeText(body.studentNumber);
+  if (!studentNumber) {
+    sendJson(res, 400, { error: "Your student number is required to register." });
+    return;
+  }
+
+  const result = await createUserRecord(data, { ...body, programId, studentNumber, role: "student" });
   if (result.error) {
     sendJson(res, result.status, { error: result.error });
     return;
@@ -1526,12 +1555,30 @@ function updateCourse(res, data, courseId, body, authUser) {
   sendJson(res, 200, { course, courses: data.courses });
 }
 
-function publicState(data) {
+// Signed-out callers get the institution and the program list and nothing else:
+// every collection comes back empty, so the user directory, courses, marks and
+// submissions are never readable without a session. Signed-in callers get the
+// full dataset minus password hashes and session tokens.
+function publicState(data, auth) {
   const shaped = ensureDataShape(data);
+
+  if (!auth) {
+    const empty = {};
+    for (const [key, value] of Object.entries(shaped)) {
+      if (key === "sessions") continue;
+      empty[key] = Array.isArray(value) ? [] : (value && typeof value === "object" ? {} : value);
+    }
+    empty.institution = shaped.institution;
+    empty.programs = shaped.programs || [];
+    empty.authenticated = false;
+    return empty;
+  }
+
   return {
     ...shaped,
     users: shaped.users.map(({ passwordHash, ...user }) => user),
-    sessions: undefined
+    sessions: undefined,
+    authenticated: true
   };
 }
 
@@ -1547,24 +1594,28 @@ async function handleApi(req, res) {
     const messageIdMatch = /^\/api\/messages\/([\w-]+)$/.exec(pathname);
 
     if (req.method === "GET" && pathname === "/api/state") {
-      sendJson(res, 200, publicState(data));
+      sendJson(res, 200, publicState(data, authenticate(req, data)));
       return;
     }
 
     if (req.method === "POST" && pathname === "/api/login") {
-      if (isRateLimited(`login:${clientIp}`)) {
+      const loginKey = `login:${clientIp}`;
+      if (isRateLimited(loginKey)) {
         sendJson(res, 429, { error: "Too many attempts. Please try again in a few minutes." });
         return;
       }
-      await handleLogin(res, data, body);
+      const signedIn = await handleLogin(res, data, body);
+      if (!signedIn) recordAttempt(loginKey);
       return;
     }
 
     if (req.method === "POST" && pathname === "/api/signup") {
-      if (isRateLimited(`signup:${clientIp}`)) {
+      const signupKey = `signup:${clientIp}`;
+      if (isRateLimited(signupKey)) {
         sendJson(res, 429, { error: "Too many attempts. Please try again in a few minutes." });
         return;
       }
+      recordAttempt(signupKey);
       await handleSignup(res, data, body);
       return;
     }
