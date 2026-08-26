@@ -7,7 +7,14 @@ const mysql = require("mysql2/promise");
 const PORT = Number(process.env.PORT || 3000);
 const ROOT = __dirname;
 const PUBLIC_DIR = path.join(ROOT, "public");
-const DATA_FILE = path.join(ROOT, "data", "vfu-data.json");
+// The dataset ships with the repo, but a host can point the app at a mounted
+// persistent disk with DATA_DIR (Render disks, for example) so the data
+// survives restarts and redeploys. On first boot against an empty disk the
+// bundled file is copied across, so a fresh mount starts seeded rather than
+// with the near-empty defaultData.
+const SEED_FILE = path.join(ROOT, "data", "vfu-data.json");
+const DATA_DIR = process.env.DATA_DIR || path.join(ROOT, "data");
+const DATA_FILE = path.join(DATA_DIR, "vfu-data.json");
 
 const mimeTypes = {
   ".html": "text/html; charset=utf-8",
@@ -402,6 +409,18 @@ function ensureDataShape(data) {
 
 function readData() {
   if (!fs.existsSync(DATA_FILE)) {
+    // A freshly mounted disk is empty: seed it from the copy that ships with
+    // the build rather than starting the institution with no courses at all.
+    if (DATA_FILE !== SEED_FILE && fs.existsSync(SEED_FILE)) {
+      try {
+        const seeded = ensureDataShape(JSON.parse(fs.readFileSync(SEED_FILE, "utf8")));
+        seeded.sessions = [];
+        writeData(seeded);
+        return seeded;
+      } catch (error) {
+        console.warn("Could not seed the data disk from the bundled dataset:", error.message);
+      }
+    }
     writeData(defaultData);
     return ensureDataShape(defaultData);
   }
@@ -422,6 +441,9 @@ function readData() {
 
 function writeData(data) {
   const normalized = ensureDataShape(data);
+  // A mounted disk can be empty on first boot, so make sure the directory is
+  // there before the atomic write/rename below.
+  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
   const tempFile = `${DATA_FILE}.tmp`;
   const payload = `${JSON.stringify(normalized, null, 2)}\n`;
   fs.writeFileSync(tempFile, payload, "utf8");

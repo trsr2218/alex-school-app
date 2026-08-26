@@ -39,16 +39,23 @@ Sign-in is enforced in **both** runtimes (the Node server and the offline/static
 - Signed-out visitors get no data at all from the API beyond the institution name and program list — no user directory to enumerate.
 - A tampered or expired session in browser storage drops straight back to the login screen.
 
-## Deploying (zero-cost)
+## Deploying
 
-The app needs no database — it runs entirely on the JSON file store unless you explicitly opt into MySQL. To deploy for free:
+There are two deployments, and the difference matters:
+
+**Static (Vercel).** `public/` is served as files and nothing answers `/api/*`, so the app falls back to its in-browser store. Sign-in is still fully enforced, but **each browser keeps its own private copy of the data** — a course a lecturer creates is not visible to a student on another device. Good for showing the interface, not for a working classroom.
+
+**Node server (Render) — shared data.** One server owns the dataset, so everyone sees the same courses, attendance, assignments and messages. This is the real deployment.
 
 1. Push this repo to GitHub.
-2. Create a free web service on [Render](https://render.com), [Railway](https://railway.app), or [Fly.io](https://fly.io), pointing at the repo.
-3. Build command: `npm install`. Start command: `npm start`. The host sets `PORT` automatically.
-4. Leave `DB_HOST` unset — auth and all data persist to `data/vfu-data.json` on the host's disk.
+2. Render dashboard > **New +** > **Blueprint** > connect this repo > **Apply**. `render.yaml` supplies the build command, start command, region and health check, and turns on auto-deploy for every push to `main`.
+3. Leave `DB_HOST` unset — auth and all data live in `data/vfu-data.json` on the server.
 
-Copy `.env.example` to `.env` for local overrides (session TTL, optional MySQL). Free tiers may sleep on inactivity and use ephemeral disks (data can reset on redeploy) — fine for a demo/coursework deployment, not for storing real student data long-term.
+**Free plan caveat:** a free Render service sleeps after 15 minutes of inactivity and its filesystem is wiped on every restart and redeploy. Data is shared between users while it is awake, but anything created since the last deploy is lost when it sleeps. First request after a sleep also takes ~30 seconds to wake.
+
+To keep data permanently, move the service to a paid instance and uncomment the `disk:` block in `render.yaml` (disks are not offered on the free plan). It sets `DATA_DIR` to the mount, and the app copies the seeded dataset onto the empty disk on first boot so nothing starts blank.
+
+Copy `.env.example` to `.env` for local overrides (session TTL, data directory, optional MySQL).
 
 ## What Is Included
 

@@ -1,11 +1,18 @@
 # Render Blueprint — https://render.com/docs/blueprint-spec
-# Deploy: Render dashboard > New + > Blueprint > connect this repo.
+#
+# Deploy: Render dashboard > New + > Blueprint > connect this repo > Apply.
+# Render reads this file, creates the service, and redeploys on every push to
+# main. Nothing else needs configuring.
+#
+# This is the shared-data deployment: one Node server holds the dataset, so a
+# course a lecturer creates is the same course every student sees. (The Vercel
+# deployment is static — there each browser keeps its own private copy.)
 services:
   - type: web
     name: alex-school-app
     runtime: node
     plan: free
-    region: oregon
+    region: frankfurt          # closest Render region to Zambia
     branch: main
     buildCommand: npm install
     startCommand: npm start
@@ -13,4 +20,25 @@ services:
     envVars:
       - key: SESSION_TTL_HOURS
         value: "12"
-      # DB_* are intentionally unset — the app runs on its zero-cost JSON store.
+      # DB_* are intentionally unset — the app runs on its own JSON store.
+
+    # ----------------------------------------------------------------------
+    # IMPORTANT, free plan: the filesystem is wiped whenever the service
+    # restarts, and a free service sleeps after 15 minutes of inactivity. Data
+    # is genuinely shared between users while it is awake, but everything
+    # created since the last deploy is lost when it sleeps or redeploys.
+    #
+    # To keep the data permanently, move the service to a paid instance and
+    # uncomment the disk below (disks are not available on the free plan).
+    # DATA_DIR points the app at the mount; on first boot it copies the seeded
+    # data/vfu-data.json onto the empty disk, so nothing starts blank.
+    #
+    #   plan: starter
+    #   envVars:
+    #     - key: DATA_DIR
+    #       value: /var/data
+    #   disk:
+    #     name: vfu-data
+    #     mountPath: /var/data
+    #     sizeGB: 1
+    # ----------------------------------------------------------------------
